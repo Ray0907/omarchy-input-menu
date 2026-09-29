@@ -1,0 +1,39 @@
+#!/bin/bash
+# Read the focused fcitx5 context live. fcitx5 can change IconName on focus
+# without emitting NewIcon, and dbusmenu actions use its last pinned context.
+# usage: snapshot [click <menu-id>]
+set -uo pipefail
+
+if (( $# )); then
+  [[ $# == 2 && $1 == click && $2 =~ ^[0-9]+$ ]] || exit 1
+fi
+
+W=(org.kde.StatusNotifierWatcher /StatusNotifierWatcher org.kde.StatusNotifierWatcher)
+name="" path=""
+for entry in $(busctl --user --auto-start=no --json=short get-property "${W[@]}" RegisteredStatusNotifierItems 2>/dev/null | jq -r '.data[]' 2>/dev/null); do
+  n=${entry%%/*}; p=/${entry#*/}
+  if [[ $(busctl --user --auto-start=no get-property "$n" "$p" org.kde.StatusNotifierItem Id 2>/dev/null) == 's "Fcitx"' ]]; then
+    name=$n; path=$p; break
+  fi
+done
+[[ -n $name ]] || { echo '{"sni":false}'; exit 0; }
+
+menu=$(busctl --user --auto-start=no --json=short get-property "$name" "$path" org.kde.StatusNotifierItem Menu 2>/dev/null | jq -r '.data // ""')
+M() { busctl --user --auto-start=no --json=short call -- "$name" "$menu" com.canonical.dbusmenu "$@"; }
+repin() { M Event isvu 0 closed i 0 0 >/dev/null 2>&1 && M AboutToShow i 0 >/dev/null 2>&1; }
+
+repin || { echo '{"sni":false}'; exit 0; }
+if [[ ${1:-} == click ]]; then
+  M Event isvu "$2" clicked i 0 0 >/dev/null || exit 1
+  sleep 0.15 # fcitx5 handles clicks after a 30 ms timer.
+  repin || { echo '{"sni":false}'; exit 0; }
+fi
+
+icon=$(busctl --user --auto-start=no --json=short get-property "$name" "$path" org.kde.StatusNotifierItem IconName | jq -r '.data // ""')
+M GetLayout iias 0 -1 0 | jq -c --arg icon "$icon" '
+  def entry(sub): . as [$id, $p, $kids]
+    | {id: $id, icon: ($p["icon-name"].data // ""), text: ($p.label.data // ""),
+       radio: (($p["toggle-type"].data // "") == "radio"),
+       checked: (($p["toggle-state"].data // 0) == 1), sub: sub},
+      ($kids[] | .data | entry(true));
+  {sni: true, icon: $icon, items: [.data[1][2][] | .data | entry(false)]}'
