@@ -1,0 +1,181 @@
+#!/bin/bash
+# Let Input Menu read fcitx5: turn on fcitx5's notificationitem addon (Omarchy's
+# unit starts fcitx5 with --disable notificationitem) and hide the tray icon
+# that addon adds, since Input Menu shows the same thing.
+#
+# Failure cases this script must handle (checked by verify.sh):
+# 1. Addon already on (fcitx5 from /etc/xdg/autostart): change nothing, exit 0.
+# 2. Run twice: second run changes nothing, exit 0.
+# 3. fcitx5 not running: start it through the unit, then wait for the tray item.
+# 4. fcitx5 started outside the unit (/etc/xdg/autostart) or by the unit:
+#    Controller1.Restart re-execs with the same arguments, so it would keep
+#    --disable. Stop it with Controller1.Exit and start the unit, which now
+#    runs without --disable.
+# 5. omarchy.tray not in the bar layout: skip hiding, exit 0.
+# 6. "Fcitx" already in the tray's hidden list: don't duplicate it.
+# 7. Tray item never appears within 10 s: exit 1 with a message.
+# 8. Another drop-in already overrides ExecStart with extra flags (-r): keep them.
+# 9. --disable lists several addons: remove only notificationitem.
+# 10. Already enabled: don't rewrite the drop-in or reload the unit.
+# 11. Tray icon was hidden before enable: disable must leave it hidden.
+# 12. omarchy-bar set fails: name the failed command and exit non-zero.
+# 13. fcitx5 down during a state check: it must stay down (no D-Bus activation).
+# 14. --disable all (alone or comma-listed): explicitly enable notificationitem.
+set -euo pipefail
+
+DROPIN_DIR="$HOME/.config/systemd/user/omarchy-fcitx5.service.d"
+# Load after existing drop-ins such as replace.conf; leave them untouched.
+DROPIN="$DROPIN_DIR/zz-input-menu.conf"
+SHELL_JSON="$HOME/.config/omarchy/shell.json"
+STATE="$HOME/.local/state/input-menu-enable.json"
+CTL=(org.fcitx.Fcitx5 /controller org.fcitx.Fcitx.Controller1)
+
+fcitx_sni() {
+  busctl --user --json=short get-property org.kde.StatusNotifierWatcher /StatusNotifierWatcher \
+    org.kde.StatusNotifierWatcher RegisteredStatusNotifierItems 2>/dev/null |
+    jq -r '.data[]' | while read -r entry; do
+      name=${entry%%/*}
+      [[ $(busctl --user get-property "$name" "/${entry#*/}" org.kde.StatusNotifierItem Id 2>/dev/null) == 's "Fcitx"' ]] && echo "$name" && break
+    done
+  return 0 # No matching tray item is an expected state, not an error.
+}
+fcitx_running() { busctl --user --auto-start=no call "${CTL[@]}" State >/dev/null 2>&1; }
+
+# Remove only notificationitem, preserving any other disabled addons.
+without_notificationitem() {
+  local addon
+  local -a addons keep=()
+  local IFS=,
+  read -r -a addons <<<"$1"
+  for addon in "${addons[@]}"; do
+    [[ $addon == notificationitem ]] || keep+=("$addon")
+  done
+  REPLY="${keep[*]-}"
+}
+
+# Keep the executable and every other flag in their original order.
+desired_command() {
+  local i value enable_idx=-1 disable_all=0
+  local -a args command=()
+  read -r -a args <<<"$1"
+  ((${#args[@]})) || { echo "Missing omarchy-fcitx5 ExecStart" >&2; return 1; }
+  for ((i=0; i<${#args[@]}; i++)); do
+    case ${args[i]} in
+      --disable)
+        i=$((i + 1))
+        [[ $i -lt ${#args[@]} ]] || { echo "Missing --disable value" >&2; return 1; }
+        without_notificationitem "${args[i]}"
+        [[ ,$REPLY, == *,all,* ]] && disable_all=1
+        [[ -z $REPLY ]] || command+=(--disable "$REPLY")
+        ;;
+      --disable=*)
+        without_notificationitem "${args[i]#--disable=}"
+        [[ ,$REPLY, == *,all,* ]] && disable_all=1
+        [[ -z $REPLY ]] || command+=("--disable=$REPLY")
+        ;;
+      --enable)
+        i=$((i + 1))
+        [[ $i -lt ${#args[@]} ]] || { echo "Missing --enable value" >&2; return 1; }
+        command+=(--enable "${args[i]}")
+        enable_idx=$((${#command[@]} - 1))
+        ;;
+      --enable=*)
+        command+=("${args[i]}")
+        enable_idx=$((${#command[@]} - 1))
+        ;;
+      *) command+=("${args[i]}") ;;
+    esac
+  done
+  if (( disable_all )); then
+    if (( enable_idx >= 0 )); then
+      value=${command[enable_idx]#--enable=}
+      if [[ ,$value, != *,notificationitem,* && ,$value, != *,all,* ]]; then
+        command[enable_idx]+=",notificationitem"
+      fi
+    else
+      command+=(--enable notificationitem)
+    fi
+  fi
+  REPLY="${command[*]}"
+}
+
+if [[ ${1:-} == --self-test ]]; then
+  check() {
+    desired_command "$1"
+    [[ $REPLY == "$2" ]] || { printf 'got: %s\nwant: %s\n' "$REPLY" "$2" >&2; return 1; }
+  }
+  check '-r --disable notificationitem' '-r'
+  check '--disable=clipboard,notificationitem' '--disable=clipboard'
+  check '--disable all' '--disable all --enable notificationitem'
+  check '--disable=all' '--disable=all --enable notificationitem'
+  check '--disable=clipboard,all' '--disable=clipboard,all --enable notificationitem'
+  check '-r' '-r'
+  check '-r --disable all --enable other' '-r --disable all --enable other,notificationitem'
+  echo ok
+  exit 0
+fi
+
+sni=$(fcitx_sni)
+refresh=1
+if [[ -n $sni && -f $DROPIN ]]; then
+  # Read the other unit fragments without removing ours. If their desired
+  # command already matches our override, a second enable changes nothing.
+  base=$(systemctl --user cat omarchy-fcitx5 | awk -v own="$DROPIN" '
+    /^# \// { skip = ($0 == "# " own); next }
+    !skip && /^ExecStart=./ { command = substr($0, 11) }
+    END { print command }
+  ')
+  if [[ -n $base ]]; then
+    desired_command "$base"
+    if [[ $(<"$DROPIN") == $'[Service]\nExecStart=\nExecStart='"$REPLY" ]]; then
+      refresh=0
+    fi
+  fi
+fi
+if [[ -z $sni || ( -f $DROPIN && $refresh == 1 ) ]]; then
+  previous=""
+  if [[ -f $DROPIN ]]; then
+    previous=$(<"$DROPIN")
+    rm "$DROPIN"
+    systemctl --user daemon-reload
+  fi
+  effective=$(systemctl --user show omarchy-fcitx5 -p ExecStart --value)
+  argv=$(sed -n 's/.*argv\[\]=\(.*\) ; ignore_errors=.*/\1/p' <<<"$effective")
+  [[ -n $argv ]] || { echo "Cannot read omarchy-fcitx5 ExecStart" >&2; exit 1; }
+  # ponytail: systemctl formats argv[] as text; use typed DBus argv if flags ever contain spaces.
+  desired_command "$argv"
+  new="[Service]
+ExecStart=
+ExecStart=$REPLY"
+  mkdir -p "$DROPIN_DIR"
+  printf '%s\n' "$new" >"$DROPIN"
+  systemctl --user daemon-reload
+  if [[ -z $sni || $previous != "$new" ]]; then
+    echo "Restarting fcitx5…"
+    if fcitx_running; then
+      busctl --user --auto-start=no call "${CTL[@]}" Exit || true
+      for _ in $(seq 20); do fcitx_running || break; sleep 0.25; done
+    fi
+    systemctl --user restart omarchy-fcitx5
+    for _ in $(seq 20); do [[ -n $(fcitx_sni) ]] && break; sleep 0.5; done
+    [[ -n $(fcitx_sni) ]] || { echo "fcitx5 did not show up for Input Menu. Check: fcitx5-diagnose" >&2; exit 1; }
+  fi
+fi
+echo "fcitx5 is visible to Input Menu."
+
+if [[ -f $SHELL_JSON ]] && jq -e '[.bar.layout[]?[]? | select(.id == "omarchy.tray")] | length > 0' "$SHELL_JSON" >/dev/null; then
+  hidden=$(jq -c '[.bar.layout[]?[]? | select(.id == "omarchy.tray") | .hidden // []][0] | if type == "array" then . elif . == null then [] else [.] end' "$SHELL_JSON")
+  if ! jq -e 'index("Fcitx")' <<<"$hidden" >/dev/null; then
+    section=$(jq -r '.bar.layout | to_entries[] | select(any(.value[]?; .id == "omarchy.tray")) | .key' "$SHELL_JSON" | head -1)
+    if ! omarchy-bar set omarchy.tray hidden "$(jq -c '. + ["Fcitx"]' <<<"$hidden")" --json --section "$section"; then
+      echo "omarchy-bar set omarchy.tray hidden failed" >&2
+      exit 1
+    fi
+    mkdir -p "$(dirname "$STATE")"
+    printf '{"addedHidden":true}\n' >"$STATE"
+    echo "Hid the duplicate fcitx5 tray icon."
+  elif [[ ! -f $STATE ]]; then
+    mkdir -p "$(dirname "$STATE")"
+    printf '{"addedHidden":false}\n' >"$STATE"
+  fi
+fi

@@ -1,0 +1,35 @@
+#!/bin/bash
+# Undo scripts/enable: drop the systemd override and unhide the fcitx5 tray icon.
+set -euo pipefail
+
+DROPIN="$HOME/.config/systemd/user/omarchy-fcitx5.service.d/zz-input-menu.conf"
+SHELL_JSON="$HOME/.config/omarchy/shell.json"
+STATE="$HOME/.local/state/input-menu-enable.json"
+
+if [[ -f $DROPIN ]]; then
+  rm "$DROPIN"
+  rmdir --ignore-fail-on-non-empty "$(dirname "$DROPIN")"
+  systemctl --user daemon-reload
+  # Exit + unit restart, not Controller1.Restart: that re-execs with the old arguments.
+  busctl --user --auto-start=no call org.fcitx.Fcitx5 /controller org.fcitx.Fcitx.Controller1 Exit 2>/dev/null || true
+  sleep 1
+  systemctl --user restart omarchy-fcitx5
+fi
+
+if [[ -f $STATE ]]; then
+  if jq -e '.addedHidden == true' "$STATE" >/dev/null && [[ -f $SHELL_JSON ]]; then
+    hidden=$(jq -c '[.bar.layout[]?[]? | select(.id == "omarchy.tray") | .hidden // []][0] // [] | if type == "array" then . else [.] end' "$SHELL_JSON")
+    if jq -e 'index("Fcitx")' <<<"$hidden" >/dev/null; then
+      section=$(jq -r '.bar.layout | to_entries[] | select(any(.value[]?; .id == "omarchy.tray")) | .key' "$SHELL_JSON" | head -1)
+      remaining=$(jq -c 'map(select(. != "Fcitx"))' <<<"$hidden")
+      # qs ipc drops an empty JSON array argument; null means no hidden icons.
+      [[ $remaining == '[]' ]] && remaining=null
+      if ! omarchy-bar set omarchy.tray hidden "$remaining" --json --section "$section"; then
+        echo "omarchy-bar set omarchy.tray hidden failed" >&2
+        exit 1
+      fi
+    fi
+  fi
+  rm "$STATE"
+fi
+echo "Input Menu's fcitx5 changes removed."
