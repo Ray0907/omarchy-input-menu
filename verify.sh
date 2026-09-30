@@ -769,6 +769,59 @@ echo "empty-desk: shell=$old_shell_pid->$new_shell_pid badge=$badge rows=${rows:
    $(jq -r .focused <<<"$fresh") == false && $(hyprctl clients -j | jq length) -eq 0 ]] ||
   { bad 'fresh empty desk has no badge or input-method rows'; exit 1; }
 
+step 'guided install with installed engines'
+zero_clients || { bad 'client windows open before guided install'; exit 1; }
+pacman -Q fcitx5-chewing fcitx5-mozc >/dev/null || { bad 'guided install requires installed chewing and mozc'; exit 1; }
+guide_loaded=$(busctl --user --auto-start=no --json=short call "${CTL[@]}" AvailableInputMethods) || { bad 'read loaded engines'; exit 1; }
+jq -e '[.data[0][][0]] | index("chewing") != null and index("mozc") != null' <<<"$guide_loaded" >/dev/null || { bad 'guided install engines are not already loaded'; exit 1; }
+guide_group=$(busctl --user --auto-start=no --json=short call "${CTL[@]}" CurrentInputMethodGroup | jq -er '.data[0]') || { bad 'read guided install group'; exit 1; }
+guide_info=$(busctl --user --auto-start=no --json=short call "${CTL[@]}" InputMethodGroupInfo s "$guide_group") || { bad 'read guided install entries'; exit 1; }
+guide_layout=$(jq -r '.data[0]' <<<"$guide_info")
+guide_keep=$(jq -c '[.data[1][] | select(.[0] != "chewing" and .[0] != "mozc")]' <<<"$guide_info")
+guide_engines=$(jq -c '[.data[1][] | select(.[0] == "chewing" or .[0] == "mozc")]' <<<"$guide_info")
+jq -e 'length == 2 and (map(.[0]) | unique | length) == 2' <<<"$guide_engines" >/dev/null || { bad 'guided install needs both original group entries'; exit 1; }
+guide_expected=$(jq -cn --arg layout "$guide_layout" --argjson keep "$guide_keep" --argjson engines "$guide_engines" '[$layout, $keep + $engines]')
+mapfile -t guide_pairs < <(jq -r '.[] | .[0], .[1]' <<<"$guide_keep")
+guide_pid=$(systemctl --user show omarchy-fcitx5 -p MainPID --value)
+mkdir "$SCRATCH/pkg-guard" || { bad 'create package guard'; exit 1; }
+cat >"$SCRATCH/pkg-guard/omarchy-pkg-add" <<'GUARD'
+#!/bin/bash
+printf 'unexpected pkg-add: %s\n' "$*" >>"${INPUT_MENU_PKG_LOG:?}"
+echo 'REFUSE: verification must not install packages' >&2
+exit 1
+GUARD
+chmod +x "$SCRATCH/pkg-guard/omarchy-pkg-add"
+: >"$SCRATCH/pkg-add.calls"
+group_changed=1
+busctl --user --auto-start=no call "${CTL[@]}" SetInputMethodGroupInfo 'ssa(ss)' \
+  "$guide_group" "$guide_layout" "$(( ${#guide_pairs[@]} / 2 ))" "${guide_pairs[@]}" || { bad 'remove installed engines from group'; exit 1; }
+injected_failure guided-install
+zero_clients || { bad 'client windows appeared before add-engine'; exit 1; }
+guide_output=$(INPUT_MENU_PKG_LOG="$SCRATCH/pkg-add.calls" PATH="$SCRATCH/pkg-guard:$PATH" \
+  "$HERE/scripts/add-engine" --engines fcitx5-chewing,fcitx5-mozc --yes 2>&1) || { echo "$guide_output"; bad 'add installed engines'; exit 1; }
+echo "$guide_output"
+guide_after=$(busctl --user --auto-start=no --json=short call "${CTL[@]}" InputMethodGroupInfo s "$guide_group" | jq -c '.data')
+[[ $guide_after == "$guide_expected" && $(systemctl --user show omarchy-fcitx5 -p MainPID --value) == "$guide_pid" && ! -s $SCRATCH/pkg-add.calls ]] || { bad 'guided install changed order/layouts, restarted fcitx5 or invoked pkg-add'; exit 1; }
+guide_profile=$(file_hash "$HOME/.config/fcitx5/profile")
+guide_output=$(INPUT_MENU_PKG_LOG="$SCRATCH/pkg-add.calls" PATH="$SCRATCH/pkg-guard:$PATH" \
+  "$HERE/scripts/add-engine" --engines fcitx5-chewing,fcitx5-mozc --yes 2>&1) || { echo "$guide_output"; bad 'repeat guided install'; exit 1; }
+echo "$guide_output"
+[[ $guide_output == *'Already set up'* && $(busctl --user --auto-start=no --json=short call "${CTL[@]}" CurrentInputMethodGroup | jq -r '.data[0]') == "$guide_group" &&
+   $(busctl --user --auto-start=no --json=short call "${CTL[@]}" InputMethodGroupInfo s "$guide_group" | jq -c '.data') == "$guide_expected" &&
+   $(systemctl --user show omarchy-fcitx5 -p MainPID --value) == "$guide_pid" &&
+   $(file_hash "$HOME/.config/fcitx5/profile") == "$guide_profile" && ! -s $SCRATCH/pkg-add.calls ]] || { bad 'repeat guided install was not a no-op'; exit 1; }
+echo "guided install: exact entries/layouts=$guide_after pid=$guide_pid unchanged; pkg-add calls=0"
+: >"$TYPED"
+if open_test_window; then
+  C switchTo fcitx-chewing '' >/dev/null; sleep 2
+  type_line su3 || bad 'Zhuyin typing after guided install'
+  close_test_window || bad 'close guided install typing window'
+  typed=$(tr '\n' '|' <"$TYPED")
+  echo "guided install typed: [$typed]"
+  [[ $typed == '你|' ]] || bad 'guided install Zhuyin typing result'
+else bad 'guided install test window never received focus'; fi
+: >"$TYPED"
+
 step 'badge follows input methods and Mozc modes'
 : > "$TYPED"
 if open_test_window; then

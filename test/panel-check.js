@@ -107,4 +107,7 @@ assert.ok(verify.indexOf("step 'candidate theme ownership and idempotence'") < v
 assert.ok(verify.includes('current/theme/colors.toml') && verify.includes('theme-tokyo-night'), 'independent palette and mid-theme interruption coverage')
 assert.ok(verify.includes('close owned window before noSni restart') && verify.includes('fresh owned context after noSni restart'), 'noSni restarts preserve the zero-client guard and get a fresh context')
 assert.ok(verify.includes('client windows remained open; fcitx5 was not restarted'), 'restoration refuses unsafe service restarts')
+assert.ok(verify.includes("step 'guided install with installed engines'"), 'installed-engine install flow is verified on the device')
+assert.ok(verify.includes('injected_failure guided-install'), 'guided install has a durable interruption checkpoint')
+assert.ok(verify.includes('"$SCRATCH/pkg-guard/omarchy-pkg-add"') && verify.includes('INPUT_MENU_PKG_LOG='), 'guided install refuses any real package installation through a scoped failing stub')
 console.log('panel wiring OK')
