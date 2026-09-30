@@ -1,0 +1,175 @@
+#!/bin/bash
+# Make fcitx5's candidate window follow the Omarchy theme.
+#
+# usage: theme status [--json] | enable [--auto] | disable | apply
+#
+# Failure cases:
+# 1. apply without ownership state or rendered files: exit 0, touch nothing.
+# 2. fcitx5 down: apply writes files and skips the reload; enable sets nothing,
+#    says so and records no state; disable refuses (exit 1) and removes nothing,
+#    because Theme would still name a folder that no longer exists.
+# 3. Never D-Bus-activate fcitx5: every call uses --auto-start=no.
+# 4. Two theme switches at once: apply holds a lock (when flock exists).
+# 5. Someone else changed Theme after us: disable leaves their value.
+# 6. Hashed images of an earlier theme are removed once the new theme.conf is in place.
+# 7. Only stock Theme/DarkTheme values (or unset) are free; anything else is claimed.
+# 8. Never edit fcitx5's config file; it is only read when fcitx5 is down.
+set -euo pipefail
+
+OURS=omarchy-input-menu
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+STATE_DIR="${INPUT_MENU_STATE_DIR:-$HOME/.local/state/input-menu}"
+STATE="$STATE_DIR/theme.json"
+RENDERED="${OMARCHY_CURRENT_THEME_DIR:-$HOME/.local/state/omarchy/current/theme}"
+THEMED_DIR="$HOME/.config/omarchy/themed"
+HOOK="$HOME/.config/omarchy/hooks/theme-set.d/input-menu"
+DEST="${FCITX5_THEME_ROOT:-$HOME/.local/share/fcitx5/themes}/$OURS"
+CONF_FILE="$HOME/.config/fcitx5/conf/classicui.conf"
+CTL=(org.fcitx.Fcitx5 /controller org.fcitx.Fcitx.Controller1)
+GLYPHS=(prev next arrow radio)
+
+bus() { busctl --user --auto-start=no "$@"; }
+fcitx_up() { bus call "${CTL[@]}" State >/dev/null 2>&1; }
+reload() { fcitx_up && bus call "${CTL[@]}" ReloadAddonConfig s classicui >/dev/null 2>&1; return 0; }
+sha8() { if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -c1-8; else shasum -a 256 "$1" | cut -c1-8; fi; }
+
+# Prints "Theme<TAB>DarkTheme"; stock values when unset.
+classicui() {
+  local json t="" d=""
+  if fcitx_up; then
+    json=$(bus --json=short call "${CTL[@]}" GetConfig s fcitx://config/addon/classicui 2>/dev/null) || return 1
+    jq -e '.data[0].data | type == "object"' <<<"$json" >/dev/null || return 1
+    t=$(jq -r '.data[0].data.Theme.data // empty' <<<"$json") || return 1
+    d=$(jq -r '.data[0].data.DarkTheme.data // empty' <<<"$json") || return 1
+  elif [[ -f $CONF_FILE ]]; then
+    t=$(sed -n 's/^Theme=//p' "$CONF_FILE" | tail -1) || return 1
+    d=$(sed -n 's/^DarkTheme=//p' "$CONF_FILE" | tail -1) || return 1
+  fi
+  printf '%s\t%s\n' "${t:-default}" "${d:-default-dark}"
+}
+
+state_of() {
+  local t=$1 d=$2
+  if [[ $t == "$OURS" && $d == "$OURS" ]]; then echo enabled
+  elif [[ $t == default && $d == default-dark ]]; then echo free
+  else echo claimed; fi
+}
+
+set_theme() { bus call "${CTL[@]}" SetConfig sv fcitx://config/addon/classicui 'a{sv}' 2 Theme s "$1" DarkTheme s "$2" >/dev/null; }
+
+cmd_apply() (
+  local conf="$RENDERED/input-menu-fcitx5.conf" g f h tmp publish=""
+  [[ -f $conf && -f $STATE ]] || return 0
+  for g in "${GLYPHS[@]}"; do
+    [[ -f $RENDERED/input-menu-fcitx5-$g.svg ]] || { echo "incomplete candidate window theme render" >&2; return 1; }
+  done
+  mkdir -p "$STATE_DIR"
+  # Lock the persistent directory, not a pathname that disable must remove.
+  if command -v flock >/dev/null; then exec 9<"$STATE_DIR"; flock 9; fi
+  [[ -f $STATE ]] || return 0 # A queued apply must not undo disable.
+  mkdir -p "$DEST"
+  tmp=$(mktemp "$STATE_DIR/apply.XXXXXX") || return 1
+  trap 'rm -f "$tmp" "$tmp.x"; [[ -z $publish ]] || rm -f "$publish"' EXIT
+  cp "$conf" "$tmp"
+  for g in "${GLYPHS[@]}"; do
+    f="$RENDERED/input-menu-fcitx5-$g.svg"
+    h=$(sha8 "$f")
+    cmp -s "$f" "$DEST/$g-$h.svg" || cp "$f" "$DEST/$g-$h.svg"
+    sed "s|^Image=$g\\.svg\$|Image=$g-$h.svg|" "$tmp" >"$tmp.x"
+    mv -f "$tmp.x" "$tmp"
+  done
+  if ! cmp -s "$tmp" "$DEST/theme.conf"; then
+    publish=$(mktemp "$DEST/.theme.conf.XXXXXX")
+    cp "$tmp" "$publish"
+    chmod 644 "$publish"
+    mv -f "$publish" "$DEST/theme.conf"
+  fi
+  for f in "$DEST"/*.svg; do
+    [[ -e $f ]] || continue
+    grep -qF "Image=$(basename "$f")" "$DEST/theme.conf" || rm -f "$f"
+  done
+  reload
+)
+
+install_files() (
+  local f tmp
+  mkdir -p "$THEMED_DIR" "$(dirname "$HOOK")"
+  for f in "$HERE"/theme/*.tpl; do
+    cmp -s "$f" "$THEMED_DIR/$(basename "$f")" || install -m 644 "$f" "$THEMED_DIR/$(basename "$f")"
+  done
+  tmp=$(mktemp "$STATE_DIR/hook.XXXXXX")
+  trap 'rm -f "$tmp"' EXIT
+  # Never fail an Omarchy theme switch: the hook always exits 0.
+  printf '#!/bin/bash\n# Input Menu: keep the fcitx5 candidate window colors in step with the Omarchy theme.\n[[ -x %q ]] && %q apply >/dev/null 2>&1\nexit 0\n' "$HERE/scripts/theme" "$HERE/scripts/theme" >"$tmp"
+  cmp -s "$tmp" "$HOOK" || install -m 644 "$tmp" "$HOOK"
+)
+
+cmd_enable() {
+  local auto=0 st t d values
+  [[ ${1:-} == --auto ]] && auto=1
+  values=$(classicui) || return 1
+  IFS=$'\t' read -r t d <<<"$values"
+  st=$(state_of "$t" "$d")
+  if (( auto )) && [[ $st == claimed ]]; then
+    echo "fcitx5's candidate window theme is \"$t\", not Input Menu's; to follow the Omarchy theme run: $HERE/scripts/theme enable"
+    return 0
+  fi
+  if ! fcitx_up; then
+    echo "fcitx5 is not running; nothing changed. Run '$HERE/scripts/theme enable' once it is." >&2
+    return 0
+  fi
+  mkdir -p "$STATE_DIR"
+  if [[ ! -f $STATE ]]; then
+    [[ $t == "$OURS" ]] && t=default          # never record our own name as the value to restore
+    [[ $d == "$OURS" ]] && d=default-dark
+    jq -n --arg t "$t" --arg d "$d" '{previous:{Theme:$t,DarkTheme:$d}}' >"$STATE.tmp"
+    mv -f "$STATE.tmp" "$STATE"
+  fi
+  install_files
+  # Only newly rendered files can prove freshness; refresh may fail for unrelated reasons.
+  rm -f "$RENDERED/input-menu-fcitx5.conf" "$RENDERED"/input-menu-fcitx5-*.svg
+  omarchy-theme-refresh >/dev/null 2>&1 || true   # renders the templates for the current theme (and runs the hook)
+  [[ -f $RENDERED/input-menu-fcitx5.conf ]] || { echo "candidate window theme has not been rendered" >&2; return 1; }
+  cmd_apply                                       # in case the refresh did not
+  set_theme "$OURS" "$OURS" || { echo "could not set the candidate window theme" >&2; return 1; }
+  echo "fcitx5's candidate window now follows the Omarchy theme"
+}
+
+cmd_disable() {
+  local t d values pt=default pd=default-dark
+  if [[ -d $STATE_DIR ]] && command -v flock >/dev/null; then exec 9<"$STATE_DIR"; flock 9; fi
+  if [[ -f $STATE ]]; then
+    pt=$(jq -r '.previous.Theme // "default"' "$STATE"); pd=$(jq -r '.previous.DarkTheme // "default-dark"' "$STATE")
+  fi
+  values=$(classicui) || return 1
+  IFS=$'\t' read -r t d <<<"$values"
+  if [[ $t == "$OURS" || $d == "$OURS" ]]; then
+    if ! fcitx_up; then
+      echo "fcitx5 is not running and still uses Input Menu's theme; start it and run disable again. Nothing was removed." >&2
+      return 1
+    fi
+    [[ $t == "$OURS" ]] && t=$pt
+    [[ $d == "$OURS" ]] && d=$pd
+    set_theme "$t" "$d" || { echo "could not restore the previous theme" >&2; return 1; }
+  fi
+  rm -f "$THEMED_DIR"/input-menu-fcitx5*.tpl "$HOOK" "$STATE" "$STATE_DIR/lock"
+  [[ ${DEST##*/} == "$OURS" ]] && rm -rf "$DEST"
+  reload
+  echo "Input Menu no longer manages fcitx5's candidate window theme"
+}
+
+cmd_status() {
+  local st t d values
+  values=$(classicui) || return 1
+  IFS=$'\t' read -r t d <<<"$values"
+  st=$(state_of "$t" "$d")
+  if [[ ${1:-} == --json ]]; then jq -nc --arg s "$st" --arg t "$t" --arg d "$d" '{state:$s,theme:$t,darkTheme:$d}'; else echo "$st"; fi
+}
+
+case "${1:-}" in
+  status)  shift; cmd_status "$@" ;;
+  enable)  shift; cmd_enable "$@" ;;
+  disable) cmd_disable ;;
+  apply)   cmd_apply ;;
+  *) echo "usage: theme status [--json] | enable [--auto] | disable | apply" >&2; exit 2 ;;
+esac
