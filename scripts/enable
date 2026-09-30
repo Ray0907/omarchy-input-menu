@@ -21,6 +21,7 @@
 # 12. omarchy-bar set fails: name the failed command and exit non-zero.
 # 13. fcitx5 down during a state check: it must stay down (no D-Bus activation).
 # 14. --disable all (alone or comma-listed): explicitly enable notificationitem.
+# 15. Theme step failure never fails enable.
 set -euo pipefail
 
 DROPIN_DIR="$HOME/.config/systemd/user/omarchy-fcitx5.service.d"
@@ -35,7 +36,7 @@ fcitx_sni() {
     org.kde.StatusNotifierWatcher RegisteredStatusNotifierItems 2>/dev/null |
     jq -r '.data[]' | while read -r entry; do
       name=${entry%%/*}
-      [[ $(busctl --user get-property "$name" "/${entry#*/}" org.kde.StatusNotifierItem Id 2>/dev/null) == 's "Fcitx"' ]] && echo "$name" && break
+      [[ $(busctl --user --auto-start=no get-property "$name" "/${entry#*/}" org.kde.StatusNotifierItem Id 2>/dev/null) == 's "Fcitx"' ]] && echo "$name" && break
     done
   return 0 # No matching tray item is an expected state, not an error.
 }
@@ -179,3 +180,5 @@ if [[ -f $SHELL_JSON ]] && jq -e '[.bar.layout[]?[]? | select(.id == "omarchy.tr
     printf '{"addedHidden":false}\n' >"$STATE"
   fi
 fi
+
+"$(dirname "$0")/theme" enable --auto || true

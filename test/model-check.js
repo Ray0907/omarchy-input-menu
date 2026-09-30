@@ -94,9 +94,12 @@ assert.deepStrictEqual(M.rows(null, null, null, null, null), [])
 
 // Strings exist in every locale with the same keys.
 const keys = Object.keys(M.strings("en")).sort()
-assert.deepStrictEqual(keys, ["addIm", "emoji", "enable", "notRunning", "onlyOne", "settings", "sniOff", "start", "switchFailed"])
+assert.deepStrictEqual(keys, ["addIm", "emoji", "enable", "matchTheme", "notRunning", "onlyOne", "settings", "sniOff", "start", "switchFailed"])
 for (const l of ["zh-TW", "ja", "xx"]) assert.deepStrictEqual(Object.keys(M.strings(l)).sort(), keys)
 assert.strictEqual(M.strings("zh-TW").emoji, "表情與符號")
+assert.strictEqual(M.strings("en").matchTheme, "Match Omarchy Theme…")
+assert.strictEqual(M.strings("zh-TW").matchTheme, "套用 Omarchy 主題色…")
+assert.strictEqual(M.strings("ja").matchTheme, "Omarchy テーマに合わせる…")
 
 // QML gives a file: URL, not a C++ QUrl with toLocalFile(). Convert before launching.
 assert.strictEqual(M.localFilePath("file:///tmp/input%20menu/o%27hara%23%25%20%C3%A9"), "/tmp/input menu/o'hara#% é")

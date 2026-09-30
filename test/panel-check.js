@@ -23,6 +23,35 @@ assert.ok(source.includes('!hasFocusedWindow && (hasValidSnapshot || !trayItem)'
 assert.ok(source.includes('methods.find(function(e) { return e.icon === s.icon'), 'when fcitx5 checks no row after restart, the published IM icon still seeds a top-level row')
 assert.equal((source.match(/onRunningChanged: if \(running\) root\.processStarts \+= 1/g) || []).length, 3, 'all source Processes count starts')
 assert.ok(qml.includes('onRunningChanged: if (running) source.processStarts += 1'), 'panel config check counts starts')
+assert.ok(qml.includes('property string themeState: ""'), 'theme state starts unknown')
+const panelProcesses = qml.match(/  Process \{[\s\S]*?\n  \}/g) || []
+assert.equal(panelProcesses.length, 2, 'config check and theme status are the only panel Processes')
+for (const process of panelProcesses)
+  assert.ok(process.includes('onRunningChanged: if (running) source.processStarts += 1'), 'every panel Process counts starts')
+const themeProcess = panelProcesses.find(process => process.includes('id: themeProc')) || ''
+assert.ok(themeProcess.includes('command: [Model.localFilePath(Qt.resolvedUrl("scripts/theme")), "status"]'), 'theme status uses the local script')
+assert.ok(/stdout: StdioCollector \{\s*waitForEnd: true\s*onStreamFinished: root\.themeState = text\.trim\(\)/.test(themeProcess), 'theme status is collected after completion')
+const menuOpen = qml.match(/onOpenedChanged: if \(opened\) \{([\s\S]*?)\n  \}/)
+assert.ok(menuOpen && menuOpen[1].includes('themeProc.running = true'), 'theme status starts when the menu opens')
+assert.equal((qml.match(/themeProc\.running\s*=/g) || []).length, 1, 'no other path starts theme status')
+assert.ok(!qml.includes('Timer {') && !/running:\s*true/.test(themeProcess), 'no timer or idle theme status launch')
+assert.ok(qml.includes('Model.shellQuote(Model.localFilePath(Qt.resolvedUrl("scripts/theme"))) + " enable"'), 'match theme passes the quoted path and enable to the presentation launcher')
+assert.ok(/a\.id === "matchTheme"\) launch\(\["omarchy-launch-floating-terminal-with-presentation",/.test(qml), 'match theme uses the same launcher as tray enable')
+const extrasBody = qml.match(/readonly property var extras: \{([\s\S]*?)\n  \}/)[1]
+const extrasFor = new Function('source', 'str', 'hasConfigTool', 'themeState', extrasBody)
+for (const state of ['', 'enabled', 'free', 'claimed']) {
+  const extras = extrasFor({ status: 'ready', singleInputMethod: false, failed: false }, {}, true, state)
+  assert.equal(extras.filter(row => row.id === 'matchTheme').length, state === 'free' || state === 'claimed' ? 1 : 0, `theme footer visibility: ${state}`)
+  if (state === 'free' || state === 'claimed') {
+    const index = extras.findIndex(row => row.id === 'matchTheme')
+    assert.equal(extras[index].kind, 'action')
+    assert.equal(extras[index - 1].id, 'emoji', 'match theme follows emoji')
+  }
+}
+const enable = require('node:fs').readFileSync('scripts/enable', 'utf8')
+const disable = require('node:fs').readFileSync('scripts/disable', 'utf8')
+assert.ok(enable.trimEnd().endsWith('"$(dirname "$0")/theme" enable --auto || true'), 'theme is best-effort after successful tray enable')
+assert.ok(disable.indexOf('"$(dirname "$0")/theme" disable || theme_pending=1') > disable.indexOf('set -euo pipefail') && disable.indexOf('"$(dirname "$0")/theme" disable || theme_pending=1') < disable.indexOf('DROPIN='), 'theme disable records a non-fatal failure before tray teardown')
 assert.ok(/onActivateRequested:\s*root\.activate\(root\.selectedIndex\)/.test(qml), 'Enter/Space activates the selected row without mouse or arrow')
 const verify = require('node:fs').readFileSync('verify.sh', 'utf8')
 assert.ok(verify.includes('REFUSE: close all client windows before testing'), 'cannot restart fcitx5 under an existing client input context')
@@ -35,4 +64,11 @@ assert.ok(verify.includes('"$STATE_DIR/scratch.XXXXXX"') && verify.includes('"$S
 assert.ok(verify.includes('sweep_stale') && verify.includes('pre_marker_cleanup'), 'safe runs sweep orphan scratch and pre-marker exits clean up')
 assert.ok(verify.includes('sleep 0.25\n  done\n  [[ -r /proc/$pid/cmdline'), 'newly started fcitx5 is boundedly awaited before launch-command verification')
 assert.ok(verify.indexOf('rm -f -- "$MARKER"') < verify.indexOf('rm -r -- "$BACKUP"', verify.indexOf('rm -f -- "$MARKER"')), 'marker is removed before backup garbage collection')
+assert.ok(verify.includes('candidateHashes') && verify.includes('original_classicui'), 'recovery includes candidate theme files and classicui values')
+assert.ok(verify.includes('candidate_path()') && verify.includes('restore_candidate()'), 'candidate restore targets are derived by code')
+assert.ok(verify.includes("step 'candidate theme ownership and idempotence'"), 'candidate theme assertions are runnable')
+assert.ok(verify.indexOf("step 'candidate theme ownership and idempotence'") < verify.indexOf("step 'isolate Input Menu"), 'candidate assertions precede shell isolation')
+assert.ok(verify.includes('current/theme/colors.toml') && verify.includes('theme-tokyo-night'), 'independent palette and mid-theme interruption coverage')
+assert.ok(verify.includes('close owned window before noSni restart') && verify.includes('fresh owned context after noSni restart'), 'noSni restarts preserve the zero-client guard and get a fresh context')
+assert.ok(verify.includes('client windows remained open; fcitx5 was not restarted'), 'restoration refuses unsafe service restarts')
 console.log('panel wiring OK')

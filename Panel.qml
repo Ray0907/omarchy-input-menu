@@ -15,6 +15,7 @@ Panel {
   readonly property var str: Model.strings(locale)
   readonly property var hiddenModes: setting("hiddenModes", Model.DEFAULT_HIDDEN_MODES)
   property bool hasConfigTool: false
+  property string themeState: ""
 
   readonly property var rows: source.status === "ready"
     ? Model.rows(source.inputMethods, source.bestEffort ? {} : source.modeCache, hiddenModes, source.currentMode, locale) : []
@@ -50,6 +51,8 @@ Panel {
     if (source.failed) out.push({ kind: "notice", title: str.switchFailed })
     out.push({ kind: "separator" })
     out.push({ kind: "action", id: "emoji", title: str.emoji })
+    if (themeState === "free" || themeState === "claimed")
+      out.push({ kind: "action", id: "matchTheme", title: str.matchTheme })
     if (hasConfigTool) out.push({ kind: "action", id: "settings", title: str.settings })
     return out
   }
@@ -79,9 +82,12 @@ Panel {
     else if (a.id === "start") launch(["systemctl", "--user", "start", "omarchy-fcitx5"])
     else if (a.id === "enable") launch(["omarchy-launch-floating-terminal-with-presentation",
                                                         Model.shellQuote(Model.localFilePath(Qt.resolvedUrl("scripts/enable")))])
+    else if (a.id === "matchTheme") launch(["omarchy-launch-floating-terminal-with-presentation",
+                                                        Model.shellQuote(Model.localFilePath(Qt.resolvedUrl("scripts/theme"))) + " enable"])
   }
 
   onOpenedChanged: if (opened) {
+    themeProc.running = true
     if (source.status !== "ready") source.checkController()
     else if (source.hasFocusedWindow) source.refresh()
     cursorActive = false
@@ -106,6 +112,16 @@ Panel {
   }
   Component.onCompleted: configToolCheck.running = true
 
+  Process {
+    id: themeProc
+    command: [Model.localFilePath(Qt.resolvedUrl("scripts/theme")), "status"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.themeState = text.trim()
+    }
+    onRunningChanged: if (running) source.processStarts += 1
+  }
+
   IpcHandler {
     target: "io.github.ray0907.input-menu"
     function state(): string {
@@ -115,6 +131,8 @@ Panel {
       s.rows = root.rows
       s.selectedIndex = root.selectedIndex
       s.cursorActive = root.cursorActive
+      s.themeState = root.themeState
+      s.extras = root.extras
       return JSON.stringify(s)
     }
     function switchTo(im: string, mode: string): void { source.switchTo(im, mode) }

@@ -1,10 +1,17 @@
 #!/bin/bash
 # Undo scripts/enable: drop the systemd override and unhide the fcitx5 tray icon.
+# Failure cases: theme failure never fails disable; retry after a tray restart
+# if fcitx5 was down, or report deferred cleanup after a bounded wait.
 set -euo pipefail
+
+theme_pending=0
+"$(dirname "$0")/theme" disable || theme_pending=1
 
 DROPIN="$HOME/.config/systemd/user/omarchy-fcitx5.service.d/zz-input-menu.conf"
 SHELL_JSON="$HOME/.config/omarchy/shell.json"
 STATE="$HOME/.local/state/input-menu-enable.json"
+CTL=(org.fcitx.Fcitx5 /controller org.fcitx.Fcitx.Controller1)
+fcitx_running() { busctl --user --auto-start=no call "${CTL[@]}" State >/dev/null 2>&1; }
 
 if [[ -f $DROPIN ]]; then
   rm "$DROPIN"
@@ -14,6 +21,12 @@ if [[ -f $DROPIN ]]; then
   busctl --user --auto-start=no call org.fcitx.Fcitx5 /controller org.fcitx.Fcitx.Controller1 Exit 2>/dev/null || true
   sleep 1
   systemctl --user restart omarchy-fcitx5
+  if (( theme_pending )); then
+    for _ in $(seq 20); do fcitx_running && break; sleep 0.5; done
+    if fcitx_running; then
+      "$(dirname "$0")/theme" disable && theme_pending=0 || true
+    fi
+  fi
 fi
 
 if [[ -f $STATE ]]; then
@@ -32,4 +45,7 @@ if [[ -f $STATE ]]; then
   fi
   rm "$STATE"
 fi
-echo "Input Menu's fcitx5 changes removed."
+if (( theme_pending )); then
+  printf 'Candidate-window theme cleanup deferred; run: %q disable\n' "$(cd "$(dirname "$0")" && pwd)/theme"
+fi
+echo "Input Menu's tray changes removed."
