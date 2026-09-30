@@ -23,6 +23,20 @@ Omarchy starts fcitx5 without its tray interface, which is where the current mod
 
 **Save your work first.** Already-open applications may need to be refocused or reopened before typing works again after the restart.
 
+## Candidate window theme
+
+The candidate window and switch popup match the current Omarchy colors, including readable page arrows on light themes. Theme changes reload the colors without restarting fcitx5; an already-open candidate keeps its old paint until its next update.
+
+Input Menu takes over automatically only when fcitx5's `Theme` and `DarkTheme` are unset or stock (`default` / `default-dark`). Any other choice is **claimed** and left alone. **Match Omarchy Theme…** in the menu explicitly takes over; disabling restores the previous values only where they still name our theme.
+
+```sh
+scripts/theme status --json  # enabled, free, or claimed
+scripts/theme enable         # explicit takeover; --auto respects claimed choices
+scripts/theme disable        # restore previous values and remove our files
+```
+
+The tray enable/disable commands also apply/release the theme, without failing the tray step if theme cleanup must be deferred. Theme commands never start fcitx5 themselves.
+
 ## Remove
 
 ```sh
@@ -36,6 +50,7 @@ omarchy plugin remove io.github.ray0907.input-menu
 
 - An engine's modes appear in the menu after it has been used once on this machine; they are then cached.
 - fcitx5-chewing doesn't publish full/half-width state.
+- Zhuyin's switch popup keeps the label `酷`: on fcitx5 5.1.22, a label-only user override replaces the input-method entry and disables Chewing, so Input Menu leaves it alone.
 - Mozc Romaji and the ABC keyboard share the badge `A`; their names in the menu differ.
 - The candidate window's position can't be configured in fcitx5's classic UI.
 
@@ -43,13 +58,15 @@ omarchy plugin remove io.github.ray0907.input-menu
 
 `./verify.sh` runs on an Omarchy machine against the real fcitx5. It needs an unlocked session, **no application windows**, and a single fcitx5 owned by the user service; it refuses otherwise, because restarting fcitx5 invalidates open windows' input contexts.
 
+Its candidate-theme baseline must be **free**; it refuses a claimed or enabled baseline before changing settings. It checks ownership, idempotence, independently read palette colors and hashed glyphs on gruvbox, tokyo-night and flexoki-light. Candidate screenshots are opened after each switch so their paint is current.
+
 It types into a throwaway terminal, restarts fcitx5, and temporarily changes the input group, shell locale, theme and bar layout. It restores all of that on exit, including on errors and signals, and leaves a log and screenshots in `verify-out/` (the screenshots are for looking at, not automated checks).
 
 The result is `ALL PASS`, `PASS WITH SKIPS: <steps>` or `SOME FAILED`. A skipped step is never counted as a pass: if the compositor doesn't deliver a synthetic mouse click the run says `PASS WITH SKIPS: mouse-click`, and on more than one monitor the idle check is skipped.
 
 ### If a run is interrupted
 
-The script records what it is about to change in `~/.local/state/input-menu-verify/` before changing anything. A new run refuses to start while an interrupted one is unresolved.
+The script records what it is about to change in `~/.local/state/input-menu-verify/` before changing anything. This includes fcitx5 `Theme`/`DarkTheme`, the Omarchy theme name, and the presence, permissions and bytes of our templates, hook, theme folder, state/lock and rendered files. Restore destinations are fixed in code, never loaded from the manifest. A new run refuses to start while an interrupted one is unresolved.
 
 - `./verify.sh --status` shows whether a run is in progress, interrupted or clean.
 - `./verify.sh --recover` only **previews**: it lists saved and current values and marks unchanged ones as skipped.
@@ -62,6 +79,8 @@ If `--status` says the recovery data is **broken**, stop and restore by hand:
 2. Restore `backups/shell.json` to `~/.config/omarchy/shell.json`.
 3. Restore `backups/zz-input-menu.conf` to `~/.config/systemd/user/omarchy-fcitx5.service.d/`, or delete that file if the original was absent.
 4. Run `systemctl --user daemon-reload` and `omarchy-restart-shell`.
-5. Check the input group, current input method, locale, theme and tray, then delete the `in-progress` marker in that directory.
+5. Inspect saved `classicui` and restore its two values through guarded `busctl --user --auto-start=no ... SetConfig` only when fcitx5 is running. Do not delete a theme folder while either active value still names it.
+6. Restore trusted `candidate-templates` files to `~/.config/omarchy/themed/`, `candidate-rendered` files to `~/.local/state/omarchy/current/theme/`, `candidate-hook` to `~/.config/omarchy/hooks/theme-set.d/input-menu`, `candidate-folder` to `~/.local/share/fcitx5/themes/omarchy-input-menu`, and `candidate-state` / `candidate-lock` to `~/.local/state/input-menu/theme.json` / `lock`. An absent saved item means it was absent originally. Leave unrelated files alone.
+7. Check the input group, current input method, locale, theme, candidate files and tray, then delete the `in-progress` marker in that directory.
 
-`VERIFY_FAIL_AFTER=<step> ./verify.sh` makes a run fail at a chosen step, to exercise the restore path.
+`VERIFY_FAIL_AFTER=<step> ./verify.sh` makes a run fail at a chosen checkpoint, to exercise the restore path. `VERIFY_KILL_AFTER=<step>` instead sends SIGKILL so the durable `--recover` path can be checked. `theme-tokyo-night` is a mid-theme checkpoint with no test window open; preview recovery changes no settings, and applying it restores the saved baseline.
