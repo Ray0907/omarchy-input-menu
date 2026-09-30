@@ -58,6 +58,11 @@ Panel {
     return out
   }
   readonly property var actionRows: extras.filter(function(x) { return x.kind === "action" })
+  function actionOrdinal(extraIndex) {
+    var n = 0
+    for (var i = 0; i < extraIndex && i < extras.length; i++) if (extras[i].kind === "action") n++
+    return n
+  }
   readonly property int rowCount: rows.length + actionRows.length
 
   property int selectedIndex: 0
@@ -257,7 +262,7 @@ Panel {
               id: act
               visible: modelData.kind === "action"
               width: parent.width
-              rowIndex: root.rows.length + root.actionRows.indexOf(modelData)
+              rowIndex: root.rows.length + root.actionOrdinal(index)
               glyph: ""
               title: modelData.title || ""
             }
@@ -275,10 +280,10 @@ Panel {
     property string title: ""
 
     readonly property bool hasCursor: root.cursorActive && root.selectedIndex === rowIndex
-    readonly property color ink: hasCursor ? Color.popups.background : root.barForeground
+    readonly property color ink: root.barForeground
 
     radius: Style.cornerRadius
-    color: hasCursor ? Color.accent : "transparent"
+    color: hasCursor ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.24) : "transparent"
     implicitHeight: rowInner.implicitHeight + Style.spacing.md * 2
 
     Row {

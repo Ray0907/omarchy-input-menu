@@ -84,6 +84,7 @@ for (const hasConfigTool of [false, true]) {
     assert.deepEqual(extras.filter(row => row.id === 'settings'), hasConfigTool ? [{ kind: 'action', id: 'settings', title: strings.settings }] : [], 'settings gate is independent of source status')
   }
 }
+assert.ok(!/actionRows\.indexOf\(/.test(qml) && qml.includes('root.actionOrdinal(index)'), 'action row index comes from position, not object identity')
 const enable = require('node:fs').readFileSync('scripts/enable', 'utf8')
 const disable = require('node:fs').readFileSync('scripts/disable', 'utf8')
 assert.ok(enable.trimEnd().endsWith('"$(dirname "$0")/theme" enable --auto || true'), 'theme is best-effort after successful tray enable')
