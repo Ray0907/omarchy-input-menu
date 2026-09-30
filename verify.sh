@@ -18,14 +18,90 @@ file_hash() {
   elif [[ ! -e $1 && ! -L $1 ]]; then echo absent
   else echo invalid; fi
 }
+CANDIDATE_KINDS=(templates rendered hook folder state lock)
+candidate_path() {
+  case $1 in
+    templates) echo "$HOME/.config/omarchy/themed" ;;
+    rendered) echo "$HOME/.local/state/omarchy/current/theme" ;;
+    hook) echo "$HOME/.config/omarchy/hooks/theme-set.d/input-menu" ;;
+    folder) echo "$HOME/.local/share/fcitx5/themes/omarchy-input-menu" ;;
+    state) echo "$HOME/.local/state/input-menu/theme.json" ;;
+    lock) echo "$HOME/.local/state/input-menu/lock" ;;
+    *) return 1 ;;
+  esac
+}
+candidate_files() {
+  local kind=$1 path=$2 f
+  local -a files=()
+  case $kind in
+    templates) files=("$path"/input-menu-fcitx5*.tpl) ;;
+    rendered) files=("$path/input-menu-fcitx5.conf" "$path"/input-menu-fcitx5-*.svg) ;;
+    *) return 1 ;;
+  esac
+  for f in "${files[@]}"; do [[ ! -e $f && ! -L $f ]] || printf '%s\n' "$f"; done
+  return 0
+}
+# Hash names, kinds, modes and bytes, refusing symlinks/special or foreign files.
+# Shared template/render directories are not ours; only our named files count.
+candidate_hash() {
+  local kind=$1 path=$2 f rel data
+  local -a files=()
+  case $kind in
+    templates|rendered) mapfile -t files < <(candidate_files "$kind" "$path" | sort) ;;
+    folder)
+      if [[ ! -e $path && ! -L $path ]]; then echo absent; return 0; fi
+      [[ -d $path && ! -L $path ]] || { echo invalid; return 1; }
+      mapfile -t files < <(find "$path" -print | sort)
+      ;;
+    *)
+      if [[ ! -e $path && ! -L $path ]]; then echo absent; return 0; fi
+      files=("$path")
+      ;;
+  esac
+  data=$(
+    for f in "${files[@]}"; do
+      [[ ! -L $f && $(stat -c %u "$f") == "$(id -u)" ]] || exit 1
+      rel=''
+      if [[ $kind == folder && $f != "$path" ]]; then rel=${f#"$path"/}; fi
+      if [[ $kind == templates || $kind == rendered ]]; then rel=${f##*/}; fi
+      [[ $rel =~ ^[A-Za-z0-9_./-]*$ ]] || exit 1
+      if [[ -d $f && $kind == folder ]]; then printf 'd %s %s\n' "$(stat -c %a "$f")" "$rel"
+      elif [[ -f $f ]]; then printf 'f %s %s %s\n' "$(stat -c %a "$f")" "$(file_hash "$f")" "$rel"
+      else exit 1; fi
+    done
+  ) || { echo invalid; return 1; }
+  printf '%s' "$data" | sha256sum | cut -d ' ' -f1
+}
+save_candidate() {
+  local kind path dest f
+  for kind in "${CANDIDATE_KINDS[@]}"; do
+    path=$(candidate_path "$kind"); dest="$BACKUP/candidate-$kind"
+    candidate_hash "$kind" "$path" >/dev/null || return 1
+    case $kind in
+      templates|rendered)
+        mkdir -m 700 "$dest" || return 1
+        while IFS= read -r f; do cp -p "$f" "$dest/" || return 1; done < <(candidate_files "$kind" "$path")
+        ;;
+      *) [[ ! -e $path ]] || cp -a "$path" "$dest" || return 1 ;;
+    esac
+  done
+}
+candidate_hashes() {
+  local kind hash out='{}'
+  for kind in "${CANDIDATE_KINDS[@]}"; do
+    hash=$(candidate_hash "$kind" "$BACKUP/candidate-$kind") || return 1
+    out=$(jq -c --arg k "$kind" --arg h "$hash" '. + {($k):$h}' <<<"$out") || return 1
+  done
+  echo "$out"
+}
 valid_manifest() {
   [[ -f $MANIFEST && ! -L $MANIFEST && $(stat -c %u "$MANIFEST") == "$(id -u)" &&
      -d $BACKUP && ! -L $BACKUP && $(stat -c '%u:%a' "$BACKUP") == "$(id -u):700" ]] || return 1
   jq -e '
     def exact($names): (keys | sort) == ($names | sort);
     def hex: type == "string" and test("^[0-9a-f]{64}$");
-    exact(["version","unit","command","pid","group","layout","pairs","im","mode","theme","position","hidden","section","lang","lcAll","shellLang","shellLcAll","backupHashes"]) and
-    .version == 1 and .unit == "active" and (.command | type == "string" and length > 0) and
+    exact(["version","unit","command","pid","group","layout","pairs","im","mode","theme","position","hidden","section","lang","lcAll","shellLang","shellLcAll","backupHashes","classicui","candidateHashes"]) and
+    .version == 2 and .unit == "active" and (.command | type == "string" and length > 0) and
     (.pid | type == "number" and . > 0 and floor == .) and
     (all([.group,.layout,.im,.mode,.theme,.hidden,.section,.lang,.lcAll,.shellLang,.shellLcAll][]; type == "string")) and
     (.pairs | type == "array" and length > 0 and all(.[]; type == "array" and length == 2 and all(.[]; type == "string"))) and
@@ -34,6 +110,8 @@ valid_manifest() {
     (.shellLang | test("^[A-Za-z0-9_.@-]*$")) and
     (.shellLcAll | test("^[A-Za-z0-9_.@-]*$")) and
     (.hidden | (fromjson? | type) | IN("array","string")) and
+    (.classicui | type == "object" and exact(["Theme","DarkTheme"]) and all(.[]; type == "string" and length > 0)) and
+    (.candidateHashes | type == "object" and exact(["templates","rendered","hook","folder","state","lock"]) and all(.[]; . == "absent" or hex)) and
     (.backupHashes | type == "object" and
       exact(["shell.json","zz-input-menu.conf","input-menu-enable.json","theme.name","profile","input-menu-modes.json"]) and
       (.["shell.json"] | hex))
@@ -45,6 +123,11 @@ valid_manifest() {
     got=$(file_hash "$BACKUP/$name")
     [[ $got == "$want" ]] || return 1
     [[ $want == absent || $(stat -c %u "$BACKUP/$name") == "$(id -u)" ]] || return 1
+  done
+  for name in "${CANDIDATE_KINDS[@]}"; do
+    want=$(jq -r --arg k "$name" '.candidateHashes[$k]' "$MANIFEST")
+    got=$(candidate_hash "$name" "$BACKUP/candidate-$name") || return 1
+    [[ $got == "$want" ]] || return 1
   done
 }
 sweep_stale() {
@@ -66,6 +149,7 @@ manual_recovery() {
   echo "MANUAL: see $HERE/README.md (broken manifest or backup). Inspect $STATE_DIR and verify trusted backups before restoring."
   echo "If trusted: cp -p '$BACKUP/shell.json' '$HOME/.config/omarchy/shell.json'"
   echo "If originally present and trusted: cp -p '$BACKUP/zz-input-menu.conf' '$HOME/.config/systemd/user/omarchy-fcitx5.service.d/zz-input-menu.conf'"
+  echo 'Inspect classicui and candidateHashes plus the candidate-* snapshots; README lists their fixed restore destinations.'
   echo 'Reload the unit, restart the shell, inspect IM/locale/theme/tray; only then clear the marker manually.'
 }
 if [[ ${1:-} == --status && ! -e $STATE_DIR && ! -L $STATE_DIR ]]; then echo 'CLEAN: no interrupted verification'; exit 0; fi
@@ -83,7 +167,7 @@ if [[ ${1:-} == --status ]]; then
   if [[ -e $MARKER ]]; then
     valid_manifest || { manual_recovery; exit 1; }
     echo "IN PROGRESS: $MARKER; preview with $HERE/verify.sh --recover"
-    jq '{unit,command,pid,group,im,mode,theme,position}' "$MANIFEST"
+    jq '{unit,command,pid,group,im,mode,theme,classicui,candidateHashes,position}' "$MANIFEST"
   else echo 'CLEAN: no interrupted verification'; fi
   exit 0
 fi
@@ -131,6 +215,7 @@ C() { qs ipc -n -p "$OMARCHY_PATH/shell" call "$T" "$@"; }
 S() { C state; }
 field() { S | jq -r "$1"; }
 focused() { [[ $(hyprctl activewindow -j | jq -r .title) == input-menu-test ]]; }
+zero_clients() { hyprctl clients -j | jq -e 'type == "array" and length == 0' >/dev/null; }
 remote() { pgrep -x fcitx5 >/dev/null && fcitx5-remote "$@"; }
 screenshot() { if grim "$OUT/$1.png"; then echo "screenshot: $1.png"; else bad "screenshot $1"; fi; }
 pre_marker_cleanup() {
@@ -162,6 +247,10 @@ if [[ $(hyprctl clients -j | jq length) -ne 0 ]]; then
   echo 'REFUSE: close all client windows before testing; restarting fcitx5 cannot preserve their input contexts'
   exit 1
 fi
+original_theme_status=$("$HERE/scripts/theme" status --json) || { echo 'REFUSE: cannot read candidate theme baseline'; exit 1; }
+jq -e '.state == "free"' <<<"$original_theme_status" >/dev/null || { echo 'REFUSE: candidate theme baseline must be free'; exit 1; }
+original_classicui=$(jq -c '{Theme:.theme,DarkTheme:.darkTheme}' <<<"$original_theme_status")
+echo "candidate baseline: $original_theme_status"
 if [[ -e $BACKUP || -L $BACKUP ]]; then
   [[ -d $BACKUP && ! -L $BACKUP && $(stat -c '%u:%a' "$BACKUP") == "$(id -u):700" ]] ||
     { echo 'REFUSE: unsafe existing backup directory'; exit 1; }
@@ -177,6 +266,8 @@ for item in "$DROPIN" "$ENABLE_STATE" "$HOME/.local/state/omarchy/current/theme.
             "$HOME/.config/fcitx5/profile" "$HOME/.local/state/input-menu-modes.json"; do
   [[ ! -f $item ]] || cp -p "$item" "$BACKUP/$(basename "$item")"
 done
+save_candidate || { echo 'REFUSE: unsafe candidate theme files or failed backup'; exit 1; }
+original_candidate_hashes=$(candidate_hashes) || exit 1
 original_hidden=$(jq -c '[.bar.layout[]?[]? | select(.id=="omarchy.tray") | .hidden // []][0] // []' "$SHELL_JSON")
 original_section=$(jq -r '.bar.layout | to_entries[] | select(any(.value[]?; .id == "omarchy.tray")) | .key' "$SHELL_JSON" | head -1)
 original_theme=$(<"$HOME/.local/state/omarchy/current/theme.name")
@@ -235,18 +326,18 @@ for saved in "$BACKUP"/* "$TYPED"; do sync -f "$saved" || exit 1; done
 sync -f "$BACKUP" || exit 1
 manifest_tmp=$(mktemp "$STATE_DIR/restore.json.tmp.XXXXXX") || exit 1
 jq -n --arg unit "$original_service" \
-  --argjson version 1 --argjson pid "$original_pid" --arg command "$original_command" \
+  --argjson version 2 --argjson pid "$original_pid" --arg command "$original_command" \
   --arg group "$original_group" --arg layout "$original_layout" \
   --argjson pairs "$(jq -c '.data[1]' <<<"$original_info")" \
   --arg im "$original_im" --arg mode "$original_mode" --arg theme "$original_theme" \
   --arg position "$original_position" --arg hidden "$original_hidden" --arg section "$original_section" \
   --arg lang "$original_lang" --arg lcAll "$original_lc_all" \
   --arg shellLang "$original_shell_lang" --arg shellLcAll "$original_shell_lc_all" \
-  --argjson backupHashes "$backup_hashes" \
+  --argjson backupHashes "$backup_hashes" --argjson classicui "$original_classicui" --argjson candidateHashes "$original_candidate_hashes" \
   '{version:$version,unit:$unit,pid:$pid,command:$command,
     group:$group,layout:$layout,pairs:$pairs,im:$im,mode:$mode,theme:$theme,
     position:$position,hidden:$hidden,section:$section,lang:$lang,lcAll:$lcAll,
-    shellLang:$shellLang,shellLcAll:$shellLcAll,backupHashes:$backupHashes}' > "$manifest_tmp" || exit 1
+    shellLang:$shellLang,shellLcAll:$shellLcAll,backupHashes:$backupHashes,classicui:$classicui,candidateHashes:$candidateHashes}' > "$manifest_tmp" || exit 1
 if [[ ${VERIFY_FAIL_BEFORE_MARKER:-} == 1 ]]; then echo 'INJECTED FAILURE before marker'; exit 42; fi
 sync -f "$manifest_tmp" && mv "$manifest_tmp" "$MANIFEST" && sync -f "$STATE_DIR" || exit 1
 printf 'restore with %s/verify.sh --recover\n' "$HERE" > "$MARKER"
@@ -274,6 +365,34 @@ restore_file() {
   [[ $(file_hash "$source") != "$(file_hash "$target")" ]] || return 0
   if [[ -f $source ]]; then mkdir -p "$(dirname "$target")"; cp -p "$source" "$target"
   else rm -f "$target"; fi
+}
+classicui_values() {
+  "$HERE/scripts/theme" status --json | jq -ce '{Theme:.theme,DarkTheme:.darkTheme}'
+}
+restore_candidate() {
+  local kind path source current f
+  current=$(classicui_values) || return 1
+  if [[ $current != "$original_classicui" ]]; then
+    busctl --user --auto-start=no call "${CTL[@]}" SetConfig sv fcitx://config/addon/classicui 'a{sv}' 2 \
+      Theme s "$(jq -r .Theme <<<"$original_classicui")" DarkTheme s "$(jq -r .DarkTheme <<<"$original_classicui")" || return 1
+  fi
+  [[ $(classicui_values) == "$original_classicui" ]] || return 1
+  for kind in "${CANDIDATE_KINDS[@]}"; do
+    path=$(candidate_path "$kind"); source="$BACKUP/candidate-$kind"
+    current=$(candidate_hash "$kind" "$path") || return 1
+    [[ $current != "$(candidate_hash "$kind" "$source")" ]] || continue
+    case $kind in
+      templates|rendered)
+        while IFS= read -r f; do rm -f -- "$f" || return 1; done < <(candidate_files "$kind" "$path")
+        while IFS= read -r f; do mkdir -p "$path" && cp -p "$f" "$path/" || return 1; done < <(candidate_files "$kind" "$source")
+        ;;
+      *)
+        [[ ! -e $path ]] || rm -r -- "$path" || return 1
+        [[ ! -e $source ]] || { mkdir -p "$(dirname "$path")" && cp -a "$source" "$path"; } || return 1
+        ;;
+    esac
+  done
+  busctl --user --auto-start=no call "${CTL[@]}" ReloadAddonConfig s classicui || return 1
 }
 restore() {
   local rc=$? current pid
@@ -306,8 +425,14 @@ restore() {
   restore_file input-menu-enable.json "$ENABLE_STATE" || bad 'restore enable ownership'
   if (( service_changed )); then systemctl --user daemon-reload || bad 'reload restored unit'; fi
   if (( service_changed )); then
+    for ((i=0; i<20; i++)); do zero_clients && break; sleep 0.25; done
+    if ! zero_clients && (( !recovering || !allow_restart )); then
+      bad 'client windows remained open; fcitx5 was not restarted'
+      echo "RECOVERY REQUIRED: $HERE/verify.sh --recover"
+      exit 1
+    fi
+    if pgrep -x fcitx5 >/dev/null; then busctl --user --auto-start=no call "${CTL[@]}" Exit >/dev/null 2>&1 || true; fi
     systemctl --user stop omarchy-fcitx5 || bad 'stop temporary fcitx5'
-    busctl --user --auto-start=no call "${CTL[@]}" Exit >/dev/null 2>&1 || true
     systemctl --user start omarchy-fcitx5 || bad 'restore managed fcitx5'
   fi
   if [[ $(systemctl --user is-active omarchy-fcitx5) != "$original_service" ]]; then bad 'restore unit activation'; fi
@@ -327,6 +452,7 @@ restore() {
         "$original_group" "$original_layout" "$(( ${#original_pairs[@]} / 2 ))" "${original_pairs[@]}" || bad 'restore fcitx5 group'
     else bad 'restore fcitx5 group: controller unavailable'; fi
   fi
+  restore_candidate || bad 'restore classicui and candidate theme artifacts'
   # The full byte copy restores both layout and the original tray JSON shape.
   cmp -s "$BACKUP/shell.json" "$SHELL_JSON" || cp -p "$BACKUP/shell.json" "$SHELL_JSON" || bad 'restore full shell config'
   current=$(jq -c '[.bar.layout[]?[]? | select(.id=="omarchy.tray") | .hidden // []][0] // []' "$SHELL_JSON")
@@ -368,6 +494,10 @@ restore() {
   [[ $(jq -c '[.bar.layout[]?[]? | select(.id=="omarchy.tray") | .hidden // []][0] // []' "$SHELL_JSON") == "$original_hidden" ]] || bad 'tray hidden icons after restore'
   for name in shell.json zz-input-menu.conf input-menu-enable.json theme.name profile input-menu-modes.json; do
     [[ $(file_hash "$BACKUP/$name") == "$(file_hash "$(backup_target "$name")")" ]] || bad "restored $name hash mismatch"
+  done
+  [[ $(classicui_values) == "$original_classicui" ]] || bad 'classicui after restore'
+  for kind in "${CANDIDATE_KINDS[@]}"; do
+    [[ $(candidate_hash "$kind" "$(candidate_path "$kind")") == "$(candidate_hash "$kind" "$BACKUP/candidate-$kind")" ]] || bad "restored candidate $kind hash mismatch"
   done
   if (( restore_errors )); then echo "RECOVERY REQUIRED: $HERE/verify.sh --recover"; echo "restore backup: $BACKUP"; exit 1; fi
   rm -f -- "$MARKER" || { echo "RECOVERY REQUIRED: cannot clear $MARKER"; exit 1; }
@@ -496,6 +626,10 @@ recover_preview() {
   locale_changed=0
   [[ $manager == "$original_lang/$original_lc_all" && $shell_env == "$original_shell_lang/$original_shell_lc_all" ]] || locale_changed=1
   compare_item theme "$(<"$HOME/.local/state/omarchy/current/theme.name")" "$original_theme"
+  compare_item classicui "$(classicui_values)" "$original_classicui"
+  for kind in "${CANDIDATE_KINDS[@]}"; do
+    compare_item "candidate-$kind" "$(candidate_hash "$kind" "$(candidate_path "$kind")")" "$(candidate_hash "$kind" "$BACKUP/candidate-$kind")"
+  done
   compare_item bar-position "$(jq -r '.bar.position // "top"' "$SHELL_JSON")" "$original_position"
   current_hash=$(file_hash "$SHELL_JSON")
   compare_item shell.json "$current_hash" "$original_shell_hash"
@@ -520,6 +654,7 @@ if [[ ${1:-} == --recover ]]; then
   original_im=$(jq -r .im "$MANIFEST")
   original_mode=$(jq -r .mode "$MANIFEST")
   original_theme=$(jq -r .theme "$MANIFEST")
+  original_classicui=$(jq -c .classicui "$MANIFEST")
   original_position=$(jq -r .position "$MANIFEST")
   original_hidden=$(jq -r .hidden "$MANIFEST")
   original_section=$(jq -r .section "$MANIFEST")
@@ -784,8 +919,9 @@ else skips+=(mouse-click); echo 'SKIP: mouse (other client windows exist)'; fi
 step 'fcitx5 down, dimmed notice, recovery without shell restart'
 shell_before=$(pgrep -f "^quickshell -n -p $OMARCHY_PATH/shell$" | head -1)
 service_changed=1
+zero_clients || { bad 'client windows open before fcitx5-down check'; exit 1; }
+if pgrep -x fcitx5 >/dev/null; then busctl --user --auto-start=no call "${CTL[@]}" Exit >/dev/null 2>&1 || true; fi
 systemctl --user stop omarchy-fcitx5 || bad 'stop fcitx5'
-busctl --user --auto-start=no call "${CTL[@]}" Exit >/dev/null 2>&1 || true
 sleep 2
 echo "down: $(field .status); icon=$(field .iconName)"
 [[ $(field .status) == down && -n $(field .iconName) ]] || bad 'down state/badge'
@@ -817,14 +953,16 @@ if open_test_window; then
 else bad 'single-IM test window not focused'; exit 1; fi
 
 step 'noSni notice, then enable and recover'
+close_test_window || { bad 'close owned window before noSni restart'; exit 1; }
+zero_clients || { bad 'client windows open before noSni restart'; exit 1; }
 "$HERE/scripts/disable" || bad 'disable for noSni'
 base_exec=$(systemctl --user show omarchy-fcitx5 -p ExecStart --value)
 if [[ $base_exec != *'--disable notificationitem'* ]]; then
   printf '[Service]\nExecStart=\nExecStart=/usr/bin/fcitx5 --disable notificationitem\n' > "$NOSNI"
   systemctl --user daemon-reload || bad 'reload noSni override'
 fi
+if pgrep -x fcitx5 >/dev/null; then busctl --user --auto-start=no call "${CTL[@]}" Exit >/dev/null 2>&1 || true; fi
 systemctl --user stop omarchy-fcitx5 || bad 'stop fcitx5 for noSni'
-busctl --user --auto-start=no call "${CTL[@]}" Exit >/dev/null 2>&1 || true
 systemctl --user start omarchy-fcitx5 || bad 'start fcitx5 without SNI'
 sleep 4
 C open >/dev/null; sleep 0.8 # Opening rechecks a controller that started without a tray item.
@@ -833,10 +971,12 @@ echo "noSni: $(field .status)"
 screenshot menu-nosni; C close >/dev/null
 injected_failure noSni
 if [[ -e $NOSNI ]]; then rm -f "$NOSNI"; systemctl --user daemon-reload; fi
+zero_clients || { bad 'client windows open before enable after noSni'; exit 1; }
 "$HERE/scripts/enable" || bad 'enable after noSni'
 sleep 2
 echo "enabled: $(field .status)"
 [[ $(field .status) == ready ]] || bad 'enable did not recover SNI'
+open_test_window || { bad 'fresh owned context after noSni restart'; exit 1; }
 
 step 'locales en, ja, zh-TW'
 # omarchy-restart-shell spawns from Hyprland, not its caller or user manager.
@@ -872,6 +1012,131 @@ omarchy-bar position "$original_position" >/dev/null 2>&1 || bad 'restore bar af
 sleep 3
 [[ $(<"$HOME/.local/state/omarchy/current/theme.name") == "$original_theme" ]] || bad 'theme not restored'
 [[ $(jq -r '.bar.position // "top"' "$SHELL_JSON") == "$original_position" ]] || bad 'bar position not restored'
+
+palette() {
+  local value
+  value=$(awk -F= -v key="$1" '$1 ~ "^" key "[[:space:]]*$" { gsub(/["[:space:]]/, "", $2); print $2; exit }' "$HOME/.local/state/omarchy/current/theme/colors.toml")
+  [[ $value =~ ^#[0-9A-Fa-f]{6}$ ]] || return 1
+  echo "$value"
+}
+ini_value() {
+  awk -v section="[$1]" -v key="$2=" '
+    /^\[/ { active = ($0 == section) }
+    active && index($0, key) == 1 { print substr($0, length(key) + 1); exit }
+  ' "$(candidate_path folder)/theme.conf"
+}
+theme_palette_matches() {
+  local section image path count=0
+  path=$(candidate_path folder)
+  [[ -f $path/theme.conf ]] || return 1
+  for section in InputPanel Menu; do
+    [[ $(ini_value "$section/Background" BorderColor) == "$accent" &&
+       $(ini_value "$section/Background" Color) == "$background" &&
+       $(ini_value "$section/Highlight" Color) == "$accent" &&
+       $(ini_value "$section" NormalColor) == "$foreground" &&
+       $(ini_value "$section" HighlightCandidateColor) == "$background" ]] || return 1
+  done
+  [[ $(ini_value InputPanel HighlightBackgroundColor) == "$selection" ]] || return 1
+  while IFS= read -r image; do
+    [[ $image =~ ^(prev|next|arrow|radio)-[0-9a-f]{8}\.svg$ && -f $path/$image ]] || return 1
+    [[ ${image##*-} == "$(sha256sum "$path/$image" | cut -c1-8).svg" ]] || return 1
+    if [[ $image == radio-* ]]; then grep -qF "fill=\"$foreground\"" "$path/$image" || return 1
+    else grep -qF "stroke=\"$foreground\"" "$path/$image" || return 1; fi
+    count=$((count + 1))
+  done < <(sed -n 's/^Image=//p' "$path/theme.conf")
+  [[ $count == 4 ]]
+}
+candidate_fingerprint() {
+  local kind
+  for kind in "${CANDIDATE_KINDS[@]}"; do printf '%s %s\n' "$kind" "$(candidate_hash "$kind" "$(candidate_path "$kind")")"; done
+}
+candidate_mtimes() {
+  local f
+  while IFS= read -r f; do stat -c '%y %n' "$f"; done < <(
+    find "$(candidate_path folder)" -print | sort
+    echo "$(candidate_path templates)"
+    candidate_files templates "$(candidate_path templates)" | sort
+    echo "$(candidate_path hook)"
+  )
+}
+candidate_removed() {
+  [[ -z $(candidate_files templates "$(candidate_path templates)") ]] || return 1
+  local kind
+  for kind in hook folder state lock; do [[ ! -e $(candidate_path "$kind") && ! -L $(candidate_path "$kind") ]] || return 1; done
+}
+
+step 'candidate theme ownership and idempotence'
+close_test_window || { bad 'close prior test window before candidate theme checks'; exit 1; }
+C close >/dev/null
+# Earlier tray-enable checks also enable the theme. Return to the saved free values.
+"$HERE/scripts/theme" disable || { bad 'reset candidate theme for ownership checks'; exit 1; }
+[[ $("$HERE/scripts/theme" status) == free ]] || { bad 'candidate theme baseline is not free'; exit 1; }
+"$HERE/scripts/theme" enable --auto || { bad 'auto-enable candidate theme'; exit 1; }
+[[ $("$HERE/scripts/theme" status) == enabled ]] || { bad 'candidate theme not enabled'; exit 1; }
+mtimes_before=$(candidate_mtimes); content_before=$(candidate_fingerprint)
+sleep 1
+"$HERE/scripts/theme" enable || { bad 'second candidate enable'; exit 1; }
+[[ $(candidate_mtimes) == "$mtimes_before" && $(candidate_fingerprint) == "$content_before" ]] || { bad 'candidate enable changed installed mtimes or bytes'; exit 1; }
+echo 'candidate enable: enabled; second enable preserved mtimes and bytes'
+C open >/dev/null; sleep 1
+S | jq -e '.themeState == "enabled" and all(.extras[]; .id != "matchTheme")' >/dev/null || { bad 'enabled menu still offers matchTheme'; exit 1; }
+screenshot theme-menu-enabled
+C close >/dev/null
+injected_failure theme-enabled
+
+# Both failure proofs use theme-tokyo-night, while no test window is open.
+for theme_name in gruvbox tokyo-night flexoki-light; do
+  step "candidate palette $theme_name"
+  OMARCHY_THEME_SKIP_BACKGROUND=1 omarchy-theme-set "$theme_name" >/dev/null 2>&1 || { bad "set candidate palette $theme_name"; exit 1; }
+  [[ $(<"$HOME/.local/state/omarchy/current/theme.name") == "$theme_name" ]] || { bad 'wrong current palette'; exit 1; }
+  accent=$(palette accent); background=$(palette background); foreground=$(palette foreground); selection=$(palette selection)
+  [[ -n $accent && -n $background && -n $foreground && -n $selection ]] || { bad 'invalid independent colors.toml'; exit 1; }
+  for _ in $(seq 20); do theme_palette_matches && break; sleep 0.5; done
+  theme_palette_matches || { bad "$theme_name palette/glyph/hash mismatch"; exit 1; }
+  [[ $(classicui_values) == '{"Theme":"omarchy-input-menu","DarkTheme":"omarchy-input-menu"}' ]] || { bad 'classicui selection changed during theme switch'; exit 1; }
+  echo "palette $theme_name: accent=$accent background=$background foreground=$foreground selection=$selection; hashed images verified"
+  injected_failure "theme-$theme_name"
+  # Open candidates after the switch; untouched old candidates retain their paint.
+  open_test_window || { bad 'focus candidate screenshot window'; exit 1; }
+  C switchTo fcitx-chewing '' >/dev/null; sleep 2
+  [[ $(remote -n) == chewing ]] || { bad 'candidate screenshot is not Zhuyin'; exit 1; }
+  focused && wtype su3 && focused && wtype -k Down || { bad 'candidate screenshot key guard'; exit 1; }
+  sleep 0.8
+  screenshot "candidate-$theme_name"
+  focused && wtype -k Escape || { bad 'cancel screenshot composition'; exit 1; }
+  remote -s keyboard-us || { bad 'restore ABC after candidate screenshot'; exit 1; }
+  close_test_window || { bad 'close candidate screenshot window'; exit 1; }
+done
+
+step 'claimed candidate theme ownership'
+"$HERE/scripts/theme" disable || { bad 'disable before claimed simulation'; exit 1; }
+busctl --user --auto-start=no call "${CTL[@]}" SetConfig sv fcitx://config/addon/classicui 'a{sv}' 2 Theme s default DarkTheme s default || { bad 'simulate claimed theme'; exit 1; }
+[[ $("$HERE/scripts/theme" status) == claimed ]] || { bad 'claimed state not detected'; exit 1; }
+content_before=$(candidate_fingerprint)
+"$HERE/scripts/theme" enable --auto || { bad 'auto-enable on claimed'; exit 1; }
+[[ $(classicui_values) == '{"Theme":"default","DarkTheme":"default"}' && $(candidate_fingerprint) == "$content_before" ]] || { bad 'auto-enable changed claimed values or files'; exit 1; }
+C open >/dev/null; sleep 1
+S | jq -e '.themeState == "claimed" and any(.extras[]; .id == "matchTheme")' >/dev/null || { bad 'claimed menu lacks matchTheme'; exit 1; }
+screenshot theme-menu-claimed
+C close >/dev/null
+"$HERE/scripts/theme" enable || { bad 'explicit claimed takeover'; exit 1; }
+[[ $("$HERE/scripts/theme" status) == enabled ]] || { bad 'explicit takeover not enabled'; exit 1; }
+"$HERE/scripts/theme" disable || { bad 'release explicit takeover'; exit 1; }
+[[ $(classicui_values) == '{"Theme":"default","DarkTheme":"default"}' ]] || { bad 'claimed values not restored'; exit 1; }
+echo 'claimed: auto left values/files unchanged; row present; explicit takeover round-tripped'
+injected_failure theme-claimed
+
+step 'candidate disable restores stock and removes artifacts'
+busctl --user --auto-start=no call "${CTL[@]}" SetConfig sv fcitx://config/addon/classicui 'a{sv}' 2 \
+  Theme s "$(jq -r .Theme <<<"$original_classicui")" DarkTheme s "$(jq -r .DarkTheme <<<"$original_classicui")" || { bad 'reset stock before disable check'; exit 1; }
+"$HERE/scripts/theme" enable --auto && "$HERE/scripts/theme" disable || { bad 'stock candidate round-trip'; exit 1; }
+[[ $(classicui_values) == "$original_classicui" && $("$HERE/scripts/theme" status) == free ]] && candidate_removed || { bad 'candidate disable left values/files'; exit 1; }
+echo 'candidate disable: free; stock values restored; templates/hook/folder/state/lock removed'
+OMARCHY_THEME_SKIP_BACKGROUND=1 omarchy-theme-set "$original_theme" >/dev/null 2>&1 || { bad 'restore original palette after candidate checks'; exit 1; }
+injected_failure theme-disabled
+# Preserve the existing idle step's owned-window positive control/close assertion.
+open_test_window || { bad 'open final owned context before idle isolation'; exit 1; }
+remote -s keyboard-us || bad 'ABC before idle isolation'
 
 # Sample all plugin threads every 50 ms; the monotonic counter also catches
 # processes too short-lived for /proc sampling.
