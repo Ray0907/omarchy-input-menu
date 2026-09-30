@@ -18,16 +18,31 @@ set -euo pipefail
 
 OURS=omarchy-input-menu
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-STATE_DIR="${INPUT_MENU_STATE_DIR:-$HOME/.local/state/input-menu}"
+STATE_DIR="$HOME/.local/state/input-menu"
+RENDERED="$HOME/.local/state/omarchy/current/theme"
+THEME_ROOT="$HOME/.local/share/fcitx5/themes"
+if [[ ${INPUT_MENU_TEST:-} == 1 ]]; then
+  STATE_DIR="${INPUT_MENU_STATE_DIR:-$STATE_DIR}"
+  RENDERED="${OMARCHY_CURRENT_THEME_DIR:-$RENDERED}"
+  THEME_ROOT="${FCITX5_THEME_ROOT:-$THEME_ROOT}"
+fi
 STATE="$STATE_DIR/theme.json"
-RENDERED="${OMARCHY_CURRENT_THEME_DIR:-$HOME/.local/state/omarchy/current/theme}"
 THEMED_DIR="$HOME/.config/omarchy/themed"
 HOOK="$HOME/.config/omarchy/hooks/theme-set.d/input-menu"
-DEST="${FCITX5_THEME_ROOT:-$HOME/.local/share/fcitx5/themes}/$OURS"
+DEST="$THEME_ROOT/$OURS"
 CONF_FILE="$HOME/.config/fcitx5/conf/classicui.conf"
 CTL=(org.fcitx.Fcitx5 /controller org.fcitx.Fcitx.Controller1)
 GLYPHS=(prev next arrow radio)
 
+under_home() { local h=${HOME%/}; [[ $1 == "$h/"* && $1 != */../* && $1 != */.. ]]; }
+remove_files() {
+  local f
+  for f; do
+    under_home "$f" || { echo "Skipping removal outside HOME: $f" >&2; continue; }
+    [[ ! -L $f ]] || { echo "Skipping symlink: $f" >&2; continue; }
+    rm -f -- "$f"
+  done
+}
 bus() { busctl --user --auto-start=no "$@"; }
 fcitx_up() { bus call "${CTL[@]}" State >/dev/null 2>&1; }
 reload() { fcitx_up && bus call "${CTL[@]}" ReloadAddonConfig s classicui >/dev/null 2>&1; return 0; }
@@ -69,7 +84,7 @@ cmd_apply() (
   [[ -f $STATE ]] || return 0 # A queued apply must not undo disable.
   mkdir -p "$DEST"
   tmp=$(mktemp "$STATE_DIR/apply.XXXXXX") || return 1
-  trap 'rm -f "$tmp" "$tmp.x"; [[ -z $publish ]] || rm -f "$publish"' EXIT
+  trap 'remove_files "$tmp" "$tmp.x"; [[ -z $publish ]] || remove_files "$publish"' EXIT
   cp "$conf" "$tmp"
   for g in "${GLYPHS[@]}"; do
     f="$RENDERED/input-menu-fcitx5-$g.svg"
@@ -86,21 +101,24 @@ cmd_apply() (
   fi
   for f in "$DEST"/*.svg; do
     [[ -e $f ]] || continue
-    grep -qF "Image=$(basename "$f")" "$DEST/theme.conf" || rm -f "$f"
+    grep -qF "Image=$(basename "$f")" "$DEST/theme.conf" || remove_files "$f"
   done
   reload
 )
 
 install_files() (
-  local f tmp
+  local f tmp dest
   mkdir -p "$THEMED_DIR" "$(dirname "$HOOK")"
   for f in "$HERE"/theme/*.tpl; do
-    cmp -s "$f" "$THEMED_DIR/$(basename "$f")" || install -m 644 "$f" "$THEMED_DIR/$(basename "$f")"
+    dest="$THEMED_DIR/$(basename "$f")"
+    [[ ! -L $dest ]] || { echo "Skipping symlink: $dest" >&2; continue; }
+    cmp -s "$f" "$dest" || install -m 644 "$f" "$dest"
   done
+  [[ ! -L $HOOK ]] || { echo "Skipping symlink: $HOOK" >&2; return 0; }
   tmp=$(mktemp "$STATE_DIR/hook.XXXXXX")
-  trap 'rm -f "$tmp"' EXIT
+  trap 'remove_files "$tmp"' EXIT
   # Never fail an Omarchy theme switch: the hook always exits 0.
-  printf '#!/bin/bash\n# Input Menu: keep the fcitx5 candidate window colors in step with the Omarchy theme.\n[[ -x %q ]] && %q apply >/dev/null 2>&1\nexit 0\n' "$HERE/scripts/theme" "$HERE/scripts/theme" >"$tmp"
+  printf '#!/bin/bash\n# Input Menu: keep the fcitx5 candidate window colors in step with the Omarchy theme.\n[[ -x %q && -O %q ]] && %q apply >/dev/null 2>&1\nexit 0\n' "$HERE/scripts/theme" "$HERE/scripts/theme" "$HERE/scripts/theme" >"$tmp"
   cmp -s "$tmp" "$HOOK" || install -m 644 "$tmp" "$HOOK"
 )
 
@@ -118,6 +136,10 @@ cmd_enable() {
     echo "fcitx5 is not running; nothing changed. Run '$HERE/scripts/theme enable' once it is." >&2
     return 0
   fi
+  if ! under_home "$HERE" || [[ ! -O $HERE ]]; then
+    echo "Refusing theme-set hook: plugin must be under HOME and owned by the current user: $HERE" >&2
+    return 1
+  fi
   mkdir -p "$STATE_DIR"
   if [[ ! -f $STATE ]]; then
     [[ $t == "$OURS" ]] && t=default          # never record our own name as the value to restore
@@ -127,7 +149,7 @@ cmd_enable() {
   fi
   install_files
   # Only newly rendered files can prove freshness; refresh may fail for unrelated reasons.
-  rm -f "$RENDERED/input-menu-fcitx5.conf" "$RENDERED"/input-menu-fcitx5-*.svg
+  remove_files "$RENDERED/input-menu-fcitx5.conf" "$RENDERED"/input-menu-fcitx5-*.svg
   omarchy-theme-refresh >/dev/null 2>&1 || true   # renders the templates for the current theme (and runs the hook)
   [[ -f $RENDERED/input-menu-fcitx5.conf ]] || { echo "candidate window theme has not been rendered" >&2; return 1; }
   cmd_apply                                       # in case the refresh did not
@@ -152,8 +174,12 @@ cmd_disable() {
     [[ $d == "$OURS" ]] && d=$pd
     set_theme "$t" "$d" || { echo "could not restore the previous theme" >&2; return 1; }
   fi
-  rm -f "$THEMED_DIR"/input-menu-fcitx5*.tpl "$HOOK" "$STATE" "$STATE_DIR/lock"
-  [[ ${DEST##*/} == "$OURS" ]] && rm -rf "$DEST"
+  remove_files "$THEMED_DIR"/input-menu-fcitx5*.tpl "$HOOK" "$STATE" "$STATE_DIR/lock"
+  if under_home "$DEST" && [[ $DEST == "${HOME%/}/"*/omarchy-input-menu ]]; then
+    rm -rf -- "$DEST"
+  else
+    echo "Skipping removal outside HOME: $DEST" >&2
+  fi
   reload
   echo "Input Menu no longer manages fcitx5's candidate window theme"
 }

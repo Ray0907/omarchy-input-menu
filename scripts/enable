@@ -32,11 +32,12 @@ STATE="$HOME/.local/state/input-menu-enable.json"
 CTL=(org.fcitx.Fcitx5 /controller org.fcitx.Fcitx.Controller1)
 
 fcitx_sni() {
-  busctl --user --json=short get-property org.kde.StatusNotifierWatcher /StatusNotifierWatcher \
+  busctl --user --auto-start=no --json=short get-property -- org.kde.StatusNotifierWatcher /StatusNotifierWatcher \
     org.kde.StatusNotifierWatcher RegisteredStatusNotifierItems 2>/dev/null |
-    jq -r '.data[]' | while read -r entry; do
-      name=${entry%%/*}
-      [[ $(busctl --user --auto-start=no get-property "$name" "/${entry#*/}" org.kde.StatusNotifierItem Id 2>/dev/null) == 's "Fcitx"' ]] && echo "$name" && break
+    jq -r '.data[]' | while IFS= read -r entry; do
+      name=${entry%%/*}; path=/${entry#*/}
+      [[ $name =~ ^[:A-Za-z0-9._-]+$ && $path =~ ^/[A-Za-z0-9_/]*$ ]] || continue
+      [[ $(busctl --user --auto-start=no get-property -- "$name" "$path" org.kde.StatusNotifierItem Id 2>/dev/null) == 's "Fcitx"' ]] && echo "$name" && break
     done
   return 0 # No matching tray item is an expected state, not an error.
 }
@@ -56,6 +57,9 @@ without_notificationitem() {
 
 # Keep the executable and every other flag in their original order.
 desired_command() {
+  case $1 in
+    *['%$;"']*) echo 'Cannot preserve omarchy-fcitx5 ExecStart containing %, $, ; or "' >&2; return 1 ;;
+  esac
   local i value enable_idx=-1 disable_all=0
   local -a args command=()
   read -r -a args <<<"$1"
@@ -126,21 +130,30 @@ if [[ -n $sni && -f $DROPIN ]]; then
     !skip && /^ExecStart=./ { command = substr($0, 11) }
     END { print command }
   ')
-  if [[ -n $base ]]; then
-    desired_command "$base"
+  # A stock line the rewrite cannot preserve (unexpanded %h, $VAR) cannot be compared: rebuild from the expanded argv.
+  if [[ -n $base ]] && desired_command "$base" 2>/dev/null; then
     if [[ $(<"$DROPIN") == $'[Service]\nExecStart=\nExecStart='"$REPLY" ]]; then
       refresh=0
     fi
   fi
 fi
+# shellcheck disable=SC2034  # published and restarted are read by the EXIT trap inside
 if [[ -z $sni || ( -f $DROPIN && $refresh == 1 ) ]]; then
-  previous=""
+  previous="" backup="" tmp="" rc=0 published=0 restarted=0
+  mkdir -p "$DROPIN_DIR"
   if [[ -f $DROPIN ]]; then
     previous=$(<"$DROPIN")
-    rm "$DROPIN"
+    backup=$(mktemp "$DROPIN_DIR/.previous.XXXXXX")
+    cp -p "$DROPIN" "$backup"
+  fi
+  # Until fcitx5 is back with the tray interface, any failure restores the previous drop-in (or removes ours).
+  trap 'rc=$?; if [[ -n $backup ]]; then mv -f -- "$backup" "$DROPIN"; elif ((published)); then rm -f -- "$DROPIN"; fi; systemctl --user daemon-reload; if ((restarted)); then systemctl --user restart omarchy-fcitx5 || true; fi; [[ -z $tmp ]] || rm -f -- "$tmp"; exit "$rc"' EXIT
+  if [[ -n $backup ]]; then
+    rm -- "$DROPIN"
     systemctl --user daemon-reload
   fi
-  effective=$(systemctl --user show omarchy-fcitx5 -p ExecStart --value)
+  effective=$(systemctl --user show omarchy-fcitx5 -p ExecStart --value) || { echo "Cannot read omarchy-fcitx5 ExecStart" >&2; exit 1; }
+  [[ $effective != *'ignore_errors=yes'* ]] || { echo "Cannot preserve omarchy-fcitx5 ExecStart with ignore_errors=yes" >&2; exit 1; }
   argv=$(sed -n 's/.*argv\[\]=\(.*\) ; ignore_errors=.*/\1/p' <<<"$effective")
   [[ -n $argv ]] || { echo "Cannot read omarchy-fcitx5 ExecStart" >&2; exit 1; }
   # ponytail: systemctl formats argv[] as text; use typed DBus argv if flags ever contain spaces.
@@ -148,19 +161,25 @@ if [[ -z $sni || ( -f $DROPIN && $refresh == 1 ) ]]; then
   new="[Service]
 ExecStart=
 ExecStart=$REPLY"
-  mkdir -p "$DROPIN_DIR"
-  printf '%s\n' "$new" >"$DROPIN"
+  tmp=$(mktemp "$DROPIN_DIR/.input-menu.XXXXXX")
+  printf '%s\n' "$new" >"$tmp"
+  chmod 644 "$tmp"
+  mv -f -- "$tmp" "$DROPIN"
+  published=1
   systemctl --user daemon-reload
   if [[ -z $sni || $previous != "$new" ]]; then
     echo "Restarting fcitx5…"
+    restarted=1
     if fcitx_running; then
       busctl --user --auto-start=no call "${CTL[@]}" Exit || true
       for _ in $(seq 20); do fcitx_running || break; sleep 0.25; done
     fi
     systemctl --user restart omarchy-fcitx5
     for _ in $(seq 20); do [[ -n $(fcitx_sni) ]] && break; sleep 0.5; done
-    [[ -n $(fcitx_sni) ]] || { echo "fcitx5 did not show up for Input Menu. Check: fcitx5-diagnose" >&2; exit 1; }
+    [[ -n $(fcitx_sni) ]] || { echo "fcitx5 did not show up for Input Menu; the previous setup was restored. Check: fcitx5-diagnose" >&2; exit 1; }
   fi
+  trap - EXIT
+  [[ -z $backup ]] || rm -f -- "$backup"
 fi
 echo "fcitx5 is visible to Input Menu."
 
@@ -168,16 +187,30 @@ if [[ -f $SHELL_JSON ]] && jq -e '[.bar.layout[]?[]? | select(.id == "omarchy.tr
   hidden=$(jq -c '[.bar.layout[]?[]? | select(.id == "omarchy.tray") | .hidden // []][0] | if type == "array" then . elif . == null then [] else [.] end' "$SHELL_JSON")
   if ! jq -e 'index("Fcitx")' <<<"$hidden" >/dev/null; then
     section=$(jq -r '.bar.layout | to_entries[] | select(any(.value[]?; .id == "omarchy.tray")) | .key' "$SHELL_JSON" | head -1)
+    mkdir -p "$(dirname "$STATE")"
+    state_backup=""
+    if [[ -f $STATE ]]; then
+      state_backup=$(mktemp "$STATE.previous.XXXXXX")
+      cp -p "$STATE" "$state_backup"
+    fi
+    state_tmp=$(mktemp "$STATE.XXXXXX")
+    trap 'rc=$?; if [[ -n $state_backup ]]; then mv -f -- "$state_backup" "$STATE"; else rm -f -- "$STATE"; fi; rm -f -- "$state_tmp"; exit "$rc"' EXIT
+    printf '{"addedHidden":true}\n' >"$state_tmp"
+    mv -f -- "$state_tmp" "$STATE"
     if ! omarchy-bar set omarchy.tray hidden "$(jq -c '. + ["Fcitx"]' <<<"$hidden")" --json --section "$section"; then
       echo "omarchy-bar set omarchy.tray hidden failed" >&2
       exit 1
     fi
-    mkdir -p "$(dirname "$STATE")"
-    printf '{"addedHidden":true}\n' >"$STATE"
+    trap - EXIT
+    [[ -z $state_backup ]] || rm -f -- "$state_backup"
     echo "Hid the duplicate fcitx5 tray icon."
   elif [[ ! -f $STATE ]]; then
     mkdir -p "$(dirname "$STATE")"
-    printf '{"addedHidden":false}\n' >"$STATE"
+    state_tmp=$(mktemp "$STATE.XXXXXX")
+    trap 'rm -f -- "$state_tmp"' EXIT
+    printf '{"addedHidden":false}\n' >"$state_tmp"
+    mv -f -- "$state_tmp" "$STATE"
+    trap - EXIT
   fi
 fi
 

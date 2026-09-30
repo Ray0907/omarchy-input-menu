@@ -5,8 +5,9 @@ set -uo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 export HOME="$T/home" FAKE_LOG="$T/log" FAKE_CLASSICUI="$T/classicui" FAKE_COLORS="$T/colors"
+export INPUT_MENU_TEST=1
 export INPUT_MENU_STATE_DIR="$HOME/.local/state/input-menu"
-export OMARCHY_CURRENT_THEME_DIR="$T/current-theme"
+export OMARCHY_CURRENT_THEME_DIR="$HOME/current-theme"
 export FCITX5_THEME_ROOT="$HOME/.local/share/fcitx5/themes"
 mkdir -p "$HOME" "$T/bin"
 
@@ -73,7 +74,10 @@ exec "$REAL_MV" "$@"
 STUB
 chmod +x "$T/bin/"*; export PATH="$T/bin:$PATH"
 
-S="$HERE/scripts/theme"; D="$FCITX5_THEME_ROOT/omarchy-input-menu"
+mkdir -p "$HOME/plugin/scripts" "$HOME/plugin/theme"
+cp "$HERE/scripts/theme" "$HOME/plugin/scripts/"
+cp "$HERE"/theme/*.tpl "$HOME/plugin/theme/"
+S="$HOME/plugin/scripts/theme"; D="$FCITX5_THEME_ROOT/omarchy-input-menu"
 fails=0
 check() { if [[ $2 != "$3" ]]; then echo "FAIL: $1: got [$2] want [$3]"; fails=1; fi; }
 count() { local n=0 f; for f; do [[ ! -e $f ]] || n=$((n + 1)); done; echo "$n"; }
@@ -82,6 +86,13 @@ setc() { echo "$1 $2" >"$FAKE_CLASSICUI"; }
 cur() { cat "$FAKE_CLASSICUI"; }
 reset() { rm -rf "$HOME/.config" "$HOME/.local" "$OMARCHY_CURRENT_THEME_DIR" "$FAKE_LOG" "$FAKE_LOG.reload"; unset FCITX_DOWN; }
 border() { sed -n 's/^BorderColor=//p' "$D/theme.conf" | head -1; }
+
+# 0. a HOME with a trailing slash is still a home (the plugin lives under it)
+reset; colors '#7aa2f7' '#1a1b26' '#a9b1d6' '#292e42' '#414868'
+setc default default-dark
+HOME="$HOME/" "$S" enable --auto >/dev/null 2>&1;   check "trailing-slash HOME enable rc" "$?" 0
+check "trailing-slash HOME took over" "$(cur)" "omarchy-input-menu omarchy-input-menu"
+reset
 
 # 1. free: unset and stock values
 reset; colors '#7aa2f7' '#1a1b26' '#a9b1d6' '#292e42' '#414868'
@@ -230,7 +241,7 @@ unset REFRESH_FAIL
 
 # 15. Hook stays harmless if the plugin has been removed (quoted path included).
 reset; colors '#7aa2f7' '#1a1b26' '#a9b1d6' '#292e42' '#414868'; setc default default-dark
-copy="$T/plugin path's copy"; mkdir -p "$copy/scripts" "$copy/theme"
+copy="$HOME/plugin path's copy"; mkdir -p "$copy/scripts" "$copy/theme"
 cp "$S" "$copy/scripts/theme"; chmod +x "$copy/scripts/theme"; cp "$HERE"/theme/*.tpl "$copy/theme/"
 "$copy/scripts/theme" enable >/dev/null
 bash "$HOME/.config/omarchy/hooks/theme-set.d/input-menu"; check "hook with quoted path" "$?" 0
@@ -278,6 +289,54 @@ if command -v flock >/dev/null; then
   wait "$apply_pid"; check "queued apply rc" "$?" 0
   [[ ! -e $D && ! -e $INPUT_MENU_STATE_DIR/theme.json ]] || { echo "FAIL: queued apply undid disable"; fails=1; }
 fi
+
+# Untrusted hook locations are refused before writing anything.
+reset; setc default default-dark
+outside="$T/outside"; mkdir -p "$outside/scripts" "$outside/theme"
+cp "$S" "$outside/scripts/theme"; cp "$HERE"/theme/*.tpl "$outside/theme/"
+out=$("$outside/scripts/theme" enable 2>&1); check 'outside HOME refused' "$?" 1
+[[ $out == *HOME* ]] || { echo 'FAIL: untrusted hook has no reason'; fails=1; }
+[[ ! -e $HOME/.config && ! -e $HOME/.local ]] || { echo 'FAIL: untrusted hook wrote files'; fails=1; }
+
+# Production ignores all three environment seams, including deletion targets.
+reset; setc default default-dark
+foreign="$T/foreign"; mkdir -p "$foreign/state" "$foreign/render" "$foreign/themes/omarchy-input-menu"
+echo '{"previous":{"Theme":"default","DarkTheme":"default-dark"}}' >"$foreign/state/theme.json"
+echo keep >"$foreign/render/input-menu-fcitx5.conf"
+echo keep >"$foreign/themes/omarchy-input-menu/keep"
+INPUT_MENU_TEST=0 INPUT_MENU_STATE_DIR="$foreign/state" OMARCHY_CURRENT_THEME_DIR="$foreign/render" FCITX5_THEME_ROOT="$foreign/themes" "$S" disable >/dev/null
+check 'production ignores state seam' "$(count "$foreign/state/theme.json")" 1
+check 'production ignores theme seam' "$(count "$foreign/themes/omarchy-input-menu/keep")" 1
+# With test seams enabled, removal still refuses paths outside HOME.
+INPUT_MENU_STATE_DIR="$foreign/state" FCITX5_THEME_ROOT="$foreign/themes" "$S" disable >/dev/null 2>&1
+check 'outside state not removed' "$(count "$foreign/state/theme.json")" 1
+check 'outside theme not removed' "$(count "$foreign/themes/omarchy-input-menu/keep")" 1
+export REFRESH_FAIL=1
+INPUT_MENU_TEST=0 INPUT_MENU_STATE_DIR="$foreign/state" OMARCHY_CURRENT_THEME_DIR="$foreign/render" FCITX5_THEME_ROOT="$foreign/themes" "$S" enable >/dev/null 2>&1
+check 'production ignores rendered seam' "$(<"$foreign/render/input-menu-fcitx5.conf")" keep
+[[ -f $HOME/.local/state/input-menu/theme.json ]] || { echo 'FAIL: production state not at default'; fails=1; }
+unset REFRESH_FAIL
+
+# Symlink destinations (including dangling ones) survive enable and disable.
+reset; setc default default-dark
+hook="$HOME/.config/omarchy/hooks/theme-set.d/input-menu"
+tpl="$HOME/.config/omarchy/themed/input-menu-fcitx5.conf.tpl"
+mkdir -p "${hook%/*}" "${tpl%/*}"
+cp "$HERE/theme/input-menu-fcitx5.conf.tpl" "$T/custom.tpl"
+echo '# custom template' >>"$T/custom.tpl"
+echo '# keep hook' >"$T/custom-hook"
+ln -s "$T/custom.tpl" "$tpl"; ln -s "$T/custom-hook" "$hook"
+ln -s "$T/missing" "${tpl%/*}/input-menu-fcitx5-extra.tpl"
+before=$(cksum "$T/custom.tpl" "$T/custom-hook")
+out=$("$S" enable 2>&1); check 'symlink enable rc' "$?" 0
+[[ $out == *symlink* ]] || { echo 'FAIL: enable symlinks need warning'; fails=1; }
+[[ -L $tpl && -L $hook ]] || { echo 'FAIL: enable replaced symlinks'; fails=1; }
+out=$("$S" disable 2>&1); check 'symlink disable rc' "$?" 0
+[[ $out == *symlink* ]] || { echo 'FAIL: disable symlinks need warning'; fails=1; }
+[[ -L $tpl && -L $hook && -L ${tpl%/*}/input-menu-fcitx5-extra.tpl ]] || { echo 'FAIL: disable removed symlinks'; fails=1; }
+check 'symlink targets untouched' "$(cksum "$T/custom.tpl" "$T/custom-hook")" "$before"
+reset; setc default default-dark; "$S" enable >/dev/null
+grep -q '\[\[.*-O ' "$hook" || { echo 'FAIL: hook lacks owner guard'; fails=1; }
 
 # 17. Never D-Bus-activate fcitx5; publish only after all referenced files exist.
 [[ ! -e $FAKE_LOG.order ]] || { echo "FAIL: theme.conf published before images:"; cat "$FAKE_LOG.order"; fails=1; }

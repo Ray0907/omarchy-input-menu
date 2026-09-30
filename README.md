@@ -6,7 +6,7 @@ A macOS-style input source menu for the Omarchy bar, for anyone typing with fcit
 
 - The boxed badge shows the current input method **and mode**: `A`, `ㄅ`, `あ`, `ア`.
 - Click it for every input method and engine mode, with a check on the current one. Arrow keys, Enter and Esc work; right-click toggles like `Ctrl+Space`.
-- It updates on window focus changes and fcitx5 events. Nothing polls: when idle it starts no processes.
+- Nothing polls: idle means no processes. A few short commands run on window focus changes, fcitx5 events and when the menu opens.
 - Names follow the system language: English, 繁體中文, 日本語. Zhuyin, Japanese (Mozc) and ABC get macOS-style names; any other engine shows the name fcitx5 gives it.
 - When fcitx5 isn't running, the badge dims and the menu offers **Start Input Method**. With only one input method, the notice offers **Install Input Methods…** instead; otherwise that action is in the footer.
 
@@ -50,13 +50,13 @@ scripts/theme enable         # explicit takeover; --auto respects claimed choice
 scripts/theme disable        # restore previous values and remove our files
 ```
 
-The tray enable/disable commands also apply/release the theme, without failing the tray step if theme cleanup must be deferred. Theme commands never start fcitx5 themselves.
+The tray enable/disable commands also apply/release the theme, without failing the tray step if theme cleanup must be deferred. `scripts/enable` (when it applies the theme) and `scripts/theme enable` run `omarchy-theme-refresh`. Theme commands never start fcitx5 themselves.
 
 ## What it changes
 
-- **Tray interface, after Enable Input Menu…:** writes `~/.config/systemd/user/omarchy-fcitx5.service.d/zz-input-menu.conf` to enable fcitx5's tray add-on, then restarts the user service. Other drop-ins are left alone. `scripts/disable` removes this override and restarts again.
+- **Tray interface, after Enable Input Menu…:** writes `~/.config/systemd/user/omarchy-fcitx5.service.d/zz-input-menu.conf` to enable fcitx5's tray add-on, then restarts the user service. Other drop-ins are left alone. `scripts/disable` removes this override and restarts again. The override copies fcitx5's current start command, so it does not follow later changes Omarchy makes to that unit: run `scripts/enable` again after an Omarchy update. Enable refuses (and leaves your setup as it was) if that command contains `%`, `$`, `;` or `"`, or ignores failures, and it puts the previous override back if fcitx5 does not come up afterwards.
 - **Duplicate tray icon, after Enable:** hides `Fcitx` in `~/.config/omarchy/shell.json` and records whether it added that hiding in `~/.local/state/input-menu-enable.json`. `scripts/disable` unhides only what Input Menu hid and removes its record.
-- **Candidate theme, after Enable when stock, or Match Omarchy Theme…:** records the previous values in `~/.local/state/input-menu/theme.json`; installs `input-menu-fcitx5*.tpl` under `~/.config/omarchy/themed/`, the `theme-set.d/input-menu` hook and `~/.local/share/fcitx5/themes/omarchy-input-menu/`. `scripts/theme disable` (also called by `scripts/disable`) restores values still naming our theme and removes those files. Omarchy's harmless rendered copies under `~/.local/state/omarchy/current/theme/input-menu-fcitx5*` may remain; after disabling, those named copies can be deleted too.
+- **Candidate theme, after Enable when stock, or Match Omarchy Theme…:** uses `~/.local/state/input-menu/` and records previous values in its `theme.json`; installs templates, the `theme-set.d/input-menu` hook and `~/.local/share/fcitx5/themes/omarchy-input-menu/`. Existing `~/.config/omarchy/themed/input-menu-fcitx5*.tpl` are overwritten; template and hook symlinks are skipped with a warning. `scripts/theme disable` (also called by `scripts/disable`) restores values still naming our theme and removes those files, except symlinks. Omarchy's harmless rendered copies under `~/.local/state/omarchy/current/theme/input-menu-fcitx5*` may remain; after disabling, those named copies can be deleted too. The theme hook is only installed when the plugin directory is under your home and owned by you.
 - **Packages and group, only after your install choices:** installs the selected missing packages through Omarchy and appends the loaded methods through fcitx5's D-Bus API. To undo, remove unwanted methods in fcitx5's settings and uninstall unwanted packages with your package manager. Plugin removal deliberately leaves both alone.
 - **Mode names, as engines are used:** caches their modes in `~/.local/state/input-menu-modes.json`. It can be deleted after removing the plugin; nothing else uses it.
 
@@ -67,7 +67,7 @@ The tray enable/disable commands also apply/release the theme, without failing t
 omarchy plugin remove io.github.ray0907.input-menu
 ```
 
-`disable` removes the override and restarts fcitx5 again, so the same advice applies. It unhides the tray icon only if Input Menu was the one that hid it.
+`disable` removes the override and restarts fcitx5 again, so the same advice applies. It unhides the tray icon only if Input Menu was the one that hid it. Removing the plugin without running `scripts/disable` leaves the drop-in, hook and templates behind.
 
 ## Limits
 
@@ -91,7 +91,7 @@ The result is `ALL PASS`, `PASS WITH SKIPS: <steps>` or `SOME FAILED`. A skipped
 
 ### If a run is interrupted
 
-The script records what it is about to change in `~/.local/state/input-menu-verify/` before changing anything. This includes fcitx5 `Theme`/`DarkTheme`, the Omarchy theme name, and the presence, permissions and bytes of our templates, hook, theme folder, state/lock and rendered files. Restore destinations are fixed in code, never loaded from the manifest. A new run refuses to start while an interrupted one is unresolved.
+The script records what it is about to change in `~/.local/state/input-menu-verify/` before changing anything. This includes fcitx5 `Theme`/`DarkTheme`, the Omarchy theme name, and the presence, permissions and bytes of our templates, hook, theme folder, state and rendered files. Restore destinations are fixed in code, never loaded from the manifest. A new run refuses to start while an interrupted one is unresolved.
 
 - `./verify.sh --status` shows whether a run is in progress, interrupted or clean.
 - `./verify.sh --recover` only **previews**: it lists saved and current values and marks unchanged ones as skipped.
@@ -105,7 +105,7 @@ If `--status` says the recovery data is **broken**, stop and restore by hand:
 3. Restore `backups/zz-input-menu.conf` to `~/.config/systemd/user/omarchy-fcitx5.service.d/`, or delete that file if the original was absent.
 4. Run `systemctl --user daemon-reload` and `omarchy-restart-shell`.
 5. Inspect saved `classicui` and restore its two values through guarded `busctl --user --auto-start=no ... SetConfig` only when fcitx5 is running. Do not delete a theme folder while either active value still names it.
-6. Restore trusted `candidate-templates` files to `~/.config/omarchy/themed/`, `candidate-rendered` files to `~/.local/state/omarchy/current/theme/`, `candidate-hook` to `~/.config/omarchy/hooks/theme-set.d/input-menu`, `candidate-folder` to `~/.local/share/fcitx5/themes/omarchy-input-menu`, and `candidate-state` / `candidate-lock` to `~/.local/state/input-menu/theme.json` / `lock`. An absent saved item means it was absent originally. Leave unrelated files alone.
+6. Restore trusted `candidate-templates` files to `~/.config/omarchy/themed/`, `candidate-rendered` files to `~/.local/state/omarchy/current/theme/`, `candidate-hook` to `~/.config/omarchy/hooks/theme-set.d/input-menu`, `candidate-folder` to `~/.local/share/fcitx5/themes/omarchy-input-menu`, and `candidate-state` to `~/.local/state/input-menu/theme.json`. An absent saved item means it was absent originally. Leave unrelated files alone.
 7. Check the input group, current input method, locale, theme, candidate files and tray, then delete the `in-progress` marker in that directory.
 
 `VERIFY_FAIL_AFTER=<step> ./verify.sh` makes a run fail at a chosen checkpoint, to exercise the restore path. `VERIFY_KILL_AFTER=<step>` instead sends SIGKILL so the durable `--recover` path can be checked. `guided-install` stops just after temporarily removing Chewing and Mozc from the group; `theme-tokyo-night` is a mid-theme checkpoint. Both have no test window open. Preview recovery changes no settings, and applying it restores the saved baseline, including the exact input group and fcitx5 launch configuration.

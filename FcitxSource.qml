@@ -49,7 +49,10 @@ Item {
   property bool cacheDirty: false
   property bool failed: false
 
-  readonly property string snapshotPath: Qt.resolvedUrl("scripts/snapshot").toString().replace("file://", "")
+  readonly property string snapshotPath: {
+    try { return Model.localFilePath(Qt.resolvedUrl("scripts/snapshot")) }
+    catch (e) { return "" }
+  }
   property bool refreshAgain: false
   property string clickId: ""
   property int focusVersion: 0
@@ -73,7 +76,7 @@ Item {
   }
 
   function refresh() {
-    if (!focusKnown || (!hasFocusedWindow && (hasValidSnapshot || !trayItem))) return
+    if (!snapshotPath || !focusKnown || (!hasFocusedWindow && (hasValidSnapshot || !trayItem))) return
     if (snapProc.running) { refreshAgain = true; return }
     runFocusVersion = focusVersion
     runSwitchVersion = switchVersion
@@ -289,6 +292,7 @@ Item {
         else {
           var clean = {}
           Object.keys(stored).forEach(function (key) {
+            if (key === "__proto__" || key === "constructor" || key === "prototype") { invalid = true; return }
             var list = stored[key]
             if (Model.isKeyboard(key) || !Array.isArray(list)) { invalid = true; return }
             var valid = list.filter(function (m) { return m && typeof m.icon === "string" && typeof m.text === "string" })

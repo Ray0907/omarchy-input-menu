@@ -142,6 +142,7 @@ assert.strictEqual(require("child_process").execFileSync("bash", ["-c", "printf 
   assert.strictEqual(count(), 1, "guard launches when nothing is running")
   // Linux pgrep -f also matches the guard itself (its command line carries the launched command); macOS hides that.
   assert.ok(g.join(" ").includes('grep -qvx "$$"'), "guard ignores its own PID")
+  assert.ok(g[2].includes('pgrep -u "$(id -u)" -f --'), "guard only matches the current user's processes")
   fs.rmSync(dir, { recursive: true })
 }
 

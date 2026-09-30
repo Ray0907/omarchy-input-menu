@@ -16,6 +16,29 @@ assert.ok(qml.includes('source.checkController()'), 'controller recheck remains 
 assert.ok(qml.includes('function mouseTarget(index: int): string') && qml.includes('var row = inputRows.itemAt(index)') && qml.includes('row.mapToItem(null,'), 'mouse test locates actual rendered row geometry')
 const source = require('node:fs').readFileSync('FcitxSource.qml', 'utf8')
 assert.ok(source.includes('function checkController()'), 'source owns the controller recheck')
+const cacheBody = source.match(/function loadCache\(raw, invalid\) \{([\s\S]*?)\n  \}\n\n  function strip/)[1]
+const loadCache = new Function('ctx', 'Model', 'raw', 'invalid', 'with (ctx) {' + cacheBody + '}')
+const cacheErrors = []
+for (const key of ['__proto__', 'constructor', 'prototype']) {
+  let saved = ''
+  const ctx = { modeCache: {}, cacheReady: false, cacheDirty: false, primary: true,
+    rememberModes() {}, cacheFile: { setText(text) { saved = text } } }
+  const raw = JSON.stringify(Object.fromEntries([[key, [{ icon: 'x', text: 'X' }]], ['fcitx_mozc', [{ icon: 'y', text: 'Y' }]]]))
+  loadCache(ctx, require('../Model.js'), raw, false)
+  try {
+    assert.ok(!Object.hasOwn(ctx.modeCache, key), `cache rejects ${key}`)
+    assert.equal(Object.getPrototypeOf(ctx.modeCache), Object.prototype, 'cache prototype remains ordinary')
+    assert.deepEqual(ctx.modeCache.fcitx_mozc, [{ icon: 'y', text: 'Y' }], 'valid modes survive')
+    assert.equal(saved, '{"fcitx_mozc":[{"icon":"y","text":"Y"}]}', `cache removes ${key} from disk`)
+  } catch (e) { cacheErrors.push(e.message) }
+}
+assert.deepEqual(cacheErrors, [], 'unsafe cache keys')
+assert.ok(source.includes('Model.localFilePath(Qt.resolvedUrl("scripts/snapshot"))'), 'snapshot uses a decoded local path')
+const snapshotBody = source.match(/readonly property string snapshotPath: \{([\s\S]*?)\n  \}/)[1]
+const snapshotPath = new Function('Model', 'Qt', snapshotBody)
+for (const [url, want] of [['file:///tmp/input%20menu/o%27hara%23%25', "/tmp/input menu/o'hara#%"], ['https://example.com/snapshot', ''], ['file:///tmp/bad%ZZ', '']])
+  assert.equal(snapshotPath(require('../Model.js'), { resolvedUrl() { return url } }), want, `safe snapshot path: ${url}`)
+assert.ok(/if \(!snapshotPath \|\|/.test(source), 'invalid snapshot path never launches')
 assert.ok(source.includes('processStarts: processStarts') && source.includes('focusEvents: focusVersion'), 'IPC exposes monotonic spawn and focus-event counters')
 assert.ok(/if \(!root\.pendingIm && !root\.hasValidSnapshot\) root\.refresh\(\)/.test(source), 'focus loss retries one provisional snapshot through the existing Process')
 assert.ok(/if \(!trayItem && bestEffort\)/.test(source), 'tray loss re-arms only provisional state')

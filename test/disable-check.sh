@@ -3,7 +3,7 @@
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-export HOME="$T/home" DISABLE_TEST="$T"
+export HOME="$T/home" DISABLE_TEST="$T" INPUT_MENU_TEST=1
 REAL_RMDIR=$(command -v rmdir); export REAL_RMDIR
 mkdir -p "$T/bin" "$T/scripts"
 cp "$HERE/scripts/disable" "$T/scripts/disable"

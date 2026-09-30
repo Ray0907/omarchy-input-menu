@@ -128,7 +128,7 @@ function shellQuote(path) {
 // line also carries the launched command (which contains the same text).
 function guardedLaunch(pattern, argv) {
   var p = String(pattern)
-  return ["sh", "-c", "pgrep -f -- \"$0\" | grep -qvx \"$$\" || exec \"$@\"", "[" + p.charAt(0) + "]" + p.slice(1)].concat(argv)
+  return ["sh", "-c", "pgrep -u \"$(id -u)\" -f -- \"$0\" | grep -qvx \"$$\" || exec \"$@\"", "[" + p.charAt(0) + "]" + p.slice(1)].concat(argv)
 }
 
 if (typeof module !== "undefined") {
