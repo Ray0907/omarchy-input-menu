@@ -37,6 +37,10 @@ assert.equal((qml.match(/themeProc\.running\s*=/g) || []).length, 1, 'no other p
 assert.ok(!qml.includes('Timer {') && !/running:\s*true/.test(themeProcess), 'no timer or idle theme status launch')
 assert.ok(qml.includes('Model.shellQuote(Model.localFilePath(Qt.resolvedUrl("scripts/theme"))) + " enable"'), 'match theme passes the quoted path and enable to the presentation launcher')
 assert.ok(/a\.id === "matchTheme"\) launch\(\["omarchy-launch-floating-terminal-with-presentation",/.test(qml), 'match theme uses the same launcher as tray enable')
+assert.ok(qml.includes('Model.shellQuote(Model.localFilePath(Qt.resolvedUrl("scripts/add-engine")))'), 'install input methods passes a quoted local path to the launcher')
+assert.ok(/a\.id === "installIm"\) launch\(\["omarchy-launch-floating-terminal-with-presentation",/.test(qml), 'install input methods uses the same counted launcher as tray enable')
+assert.equal((qml.match(/Qt\.resolvedUrl\("scripts\/add-engine"\)/g) || []).length, 1, 'add-engine is referenced only by its action launcher')
+assert.ok(!qml.includes('str.addIm'), 'the configtool-only single-input-method action is gone')
 const extrasBody = qml.match(/readonly property var extras: \{([\s\S]*?)\n  \}/)[1]
 const extrasFor = new Function('source', 'str', 'hasConfigTool', 'themeState', extrasBody)
 for (const state of ['', 'enabled', 'free', 'claimed']) {
@@ -45,7 +49,39 @@ for (const state of ['', 'enabled', 'free', 'claimed']) {
   if (state === 'free' || state === 'claimed') {
     const index = extras.findIndex(row => row.id === 'matchTheme')
     assert.equal(extras[index].kind, 'action')
-    assert.equal(extras[index - 1].id, 'emoji', 'match theme follows emoji')
+    assert.equal(extras[index - 1].id, 'installIm', 'match theme follows the install action after emoji')
+  }
+}
+const strings = require('../Model.js').strings('en')
+for (const hasConfigTool of [false, true]) {
+  for (const singleInputMethod of [false, true]) {
+    const extras = extrasFor({ status: 'ready', singleInputMethod, failed: false }, strings, hasConfigTool, 'free')
+    const install = extras.filter(row => row.id === 'installIm')
+    assert.deepEqual(install, [{ kind: 'action', id: 'installIm', title: strings.installIm }], 'exactly one install action, independent of configtool')
+    const separator = extras.findIndex(row => row.kind === 'separator')
+    const index = extras.findIndex(row => row.id === 'installIm')
+    if (singleInputMethod) {
+      assert.equal(index, 1, 'the single-input-method notice is followed by its install action')
+      assert.deepEqual(extras[0], { kind: 'notice', title: strings.onlyOne })
+      assert.ok(index < separator, 'single-input-method install action is not repeated in the footer')
+    } else {
+      assert.ok(index > separator, 'normal install action belongs to the footer')
+      assert.equal(extras[index - 1].id, 'emoji', 'normal install action immediately follows emoji')
+    }
+    assert.deepEqual(extras.filter(row => row.id === 'settings'), hasConfigTool ? [{ kind: 'action', id: 'settings', title: strings.settings }] : [], 'settings retains its own configtool gate and title')
+    assert.equal(extras.filter(row => row.kind === 'action').filter(row => row.id === 'installIm').length, 1, 'actionRows contains install once')
+  }
+}
+for (const hasConfigTool of [false, true]) {
+  for (const status of ['down', 'noSni']) {
+    const extras = extrasFor({ status, singleInputMethod: false, failed: false }, strings, hasConfigTool, 'free')
+    assert.deepEqual(extras.filter(row => row.id === 'installIm'), status === 'down' ? [] : [{ kind: 'action', id: 'installIm', title: strings.installIm }], `install visibility when ${status}`)
+    assert.equal(extras[1].id, status === 'down' ? 'start' : 'enable', 'unavailable-source notice retains its way forward')
+    if (status === 'noSni') {
+      const index = extras.findIndex(row => row.id === 'installIm')
+      assert.equal(extras[index - 1].id, 'emoji', 'noSni keeps install immediately after emoji')
+    }
+    assert.deepEqual(extras.filter(row => row.id === 'settings'), hasConfigTool ? [{ kind: 'action', id: 'settings', title: strings.settings }] : [], 'settings gate is independent of source status')
   }
 }
 const enable = require('node:fs').readFileSync('scripts/enable', 'utf8')

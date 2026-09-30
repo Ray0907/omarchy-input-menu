@@ -46,11 +46,12 @@ Panel {
       out.push({ kind: "action", id: "enable", title: str.enable })
     } else if (source.singleInputMethod) {
       out.push({ kind: "notice", title: str.onlyOne })
-      if (hasConfigTool) out.push({ kind: "action", id: "settings", title: str.addIm })
+      out.push({ kind: "action", id: "installIm", title: str.installIm })
     }
     if (source.failed) out.push({ kind: "notice", title: str.switchFailed })
     out.push({ kind: "separator" })
     out.push({ kind: "action", id: "emoji", title: str.emoji })
+    if (source.status !== "down" && !source.singleInputMethod) out.push({ kind: "action", id: "installIm", title: str.installIm })
     if (themeState === "free" || themeState === "claimed")
       out.push({ kind: "action", id: "matchTheme", title: str.matchTheme })
     if (hasConfigTool) out.push({ kind: "action", id: "settings", title: str.settings })
@@ -82,6 +83,8 @@ Panel {
     else if (a.id === "start") launch(["systemctl", "--user", "start", "omarchy-fcitx5"])
     else if (a.id === "enable") launch(["omarchy-launch-floating-terminal-with-presentation",
                                                         Model.shellQuote(Model.localFilePath(Qt.resolvedUrl("scripts/enable")))])
+    else if (a.id === "installIm") launch(["omarchy-launch-floating-terminal-with-presentation",
+                                                        Model.shellQuote(Model.localFilePath(Qt.resolvedUrl("scripts/add-engine")))])
     else if (a.id === "matchTheme") launch(["omarchy-launch-floating-terminal-with-presentation",
                                                         Model.shellQuote(Model.localFilePath(Qt.resolvedUrl("scripts/theme"))) + " enable"])
   }
