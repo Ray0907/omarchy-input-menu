@@ -338,6 +338,44 @@ check 'symlink targets untouched' "$(cksum "$T/custom.tpl" "$T/custom-hook")" "$
 reset; setc default default-dark; "$S" enable >/dev/null
 grep -q '\[\[.*-O ' "$hook" || { echo 'FAIL: hook lacks owner guard'; fails=1; }
 
+# 18. Symlinked ancestors or destinations never redirect writes or removals (managed scope is checked on the real path).
+tree_sum() { (cd "$1" && find . -type f | sort | while read -r f; do cksum "$f"; done); }
+link_scene() {   # $1 what to link: root | dest | conf | glyph | themed | hookdir
+  reset; colors '#7aa2f7' '#1a1b26' '#a9b1d6' '#292e42' '#414868'; setc default default-dark
+  "$S" enable >/dev/null
+  rm -rf "$HOME/elsewhere"; mkdir -p "$HOME/elsewhere"; printf 'victim\n' >"$HOME/elsewhere/keep.txt"
+  case $1 in
+    root)  rm -rf "$FCITX5_THEME_ROOT"; mkdir -p "$HOME/elsewhere/themes"; ln -s "$HOME/elsewhere/themes" "$FCITX5_THEME_ROOT"
+           mkdir -p "$HOME/elsewhere/themes/omarchy-input-menu"; printf 'victim\n' >"$HOME/elsewhere/themes/omarchy-input-menu/theme.conf" ;;
+    dest)  rm -rf "$D"; mkdir -p "$HOME/elsewhere/dest"; printf 'victim\n' >"$HOME/elsewhere/dest/theme.conf"; ln -s "$HOME/elsewhere/dest" "$D" ;;
+    conf)  cp "$HOME/elsewhere/keep.txt" "$HOME/elsewhere/conf-target"; rm -f "$D/theme.conf"; ln -s "$HOME/elsewhere/conf-target" "$D/theme.conf" ;;
+    glyph) cp "$HOME/elsewhere/keep.txt" "$HOME/elsewhere/glyph-target"; for f in "$D"/prev-*.svg; do rm -f "$f"; ln -s "$HOME/elsewhere/glyph-target" "$f"; done ;;
+    themed) mkdir -p "$HOME/elsewhere/themed"; cp "$THEMED"/*.tpl "$HOME/elsewhere/themed/"; rm -rf "$THEMED"; ln -s "$HOME/elsewhere/themed" "$THEMED" ;;
+    hookdir) mkdir -p "$HOME/elsewhere/hooks"; cp "$HOOKS"/* "$HOME/elsewhere/hooks/"; rm -rf "$HOOKS"; ln -s "$HOME/elsewhere/hooks" "$HOOKS" ;;
+  esac
+  tree_sum "$HOME/elsewhere" >"$T/elsewhere.before"
+}
+THEMED="$HOME/.config/omarchy/themed"; HOOKS="$HOME/.config/omarchy/hooks/theme-set.d"
+for what in root dest conf glyph; do
+  link_scene $what; colors '#ff0000' '#000000' '#ffffff' '#111111' '#222222'
+  out=$("$S" apply 2>&1) && rc=0 || rc=$?
+  [[ $rc -ne 0 && $out == *symlink* ]] || { echo "FAIL: apply through linked $what: rc=$rc out=$out"; fails=1; }
+  check "apply linked $what left target untouched" "$(tree_sum "$HOME/elsewhere")" "$(cat "$T/elsewhere.before")"
+done
+for what in root dest themed hookdir; do
+  link_scene $what
+  "$S" disable >/dev/null 2>&1 || true
+  check "disable linked $what left target untouched" "$(tree_sum "$HOME/elsewhere")" "$(cat "$T/elsewhere.before")"
+done
+for what in themed hookdir; do
+  link_scene $what; rm -f "$INPUT_MENU_STATE_DIR/theme.json"
+  setc default default-dark
+  out=$("$S" enable 2>&1) && rc=0 || rc=$?
+  [[ $rc -ne 0 && $out == *symlink* ]] || { echo "FAIL: enable through linked $what: rc=$rc out=$out"; fails=1; }
+  check "enable linked $what left target untouched" "$(tree_sum "$HOME/elsewhere")" "$(cat "$T/elsewhere.before")"
+done
+reset
+
 # 17. Never D-Bus-activate fcitx5; publish only after all referenced files exist.
 [[ ! -e $FAKE_LOG.order ]] || { echo "FAIL: theme.conf published before images:"; cat "$FAKE_LOG.order"; fails=1; }
 [[ ! -e $FAKE_LOG.bad ]] || { echo "FAIL: busctl call without --auto-start=no:"; cat "$FAKE_LOG.bad"; fails=1; }

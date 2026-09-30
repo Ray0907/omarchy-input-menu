@@ -120,6 +120,15 @@ if [[ ${1:-} == --self-test ]]; then
   exit 0
 fi
 
+# Only real paths are written: a symlinked ancestor (or file) could redirect the write anywhere the user can reach.
+linked_path() { local p=$1 h=${HOME%/}; while [[ $p == "$h"/* ]]; do [[ -L $p ]] && return 0; p=${p%/*}; done; return 1; }
+for managed in "$DROPIN" "$STATE"; do
+  if linked_path "$managed"; then
+    echo "Refusing to use a symlinked path (move or unlink it): $managed" >&2
+    exit 1
+  fi
+done
+
 sni=$(fcitx_sni)
 refresh=1
 if [[ -n $sni && -f $DROPIN ]]; then

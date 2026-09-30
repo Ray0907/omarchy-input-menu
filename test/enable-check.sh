@@ -136,5 +136,21 @@ printf '[Service]\nExecStart=\nExecStart=/usr/bin/fcitx5\n' >"$DROPIN"
 CAT_LINE='%h/bin/fcitx5' "$T/scripts/enable" >"$T/output" 2>&1
 check 'rerun with unexpandable unit exit' "$?" 0
 [[ ! -e $T/systemctl ]] || ! grep -q ' restart ' "$T/systemctl" || { echo 'FAIL: rerun restarted fcitx5'; fails=1; }
+
+# Linked systemd or state directories are never written through.
+tree_sum() { (cd "$1" && find . -type f | sort | while read -r f; do cksum "$f"; done); }
+for where in systemd state; do
+  reset; rm -rf "$HOME/elsewhere"; mkdir -p "$HOME/elsewhere"
+  if [[ $where == systemd ]]; then
+    mkdir -p "$HOME/elsewhere/dropins"; cp -R "${DROPIN%/*}" "$HOME/elsewhere/dropins/" 2>/dev/null
+    rm -rf "$HOME/.config/systemd/user"; ln -s "$HOME/elsewhere/dropins" "$HOME/.config/systemd/user"
+  else
+    mkdir -p "$HOME/.local"; ln -s "$HOME/elsewhere" "$HOME/.local/state"
+  fi
+  tree_sum "$HOME/elsewhere" >"$T/elsewhere.before"
+  out=$("$T/scripts/enable" 2>&1); rc=$?
+  [[ $rc -ne 0 && $out == *symlink* ]] || { echo "FAIL: enable through linked $where: rc=$rc out=$out"; fails=1; }
+  check "enable linked $where left target untouched" "$(tree_sum "$HOME/elsewhere")" "$(cat "$T/elsewhere.before")"
+done
 if (( fails )); then echo FAILED; exit 1; fi
 echo ok

@@ -12,6 +12,14 @@ SHELL_JSON="$HOME/.config/omarchy/shell.json"
 STATE="$HOME/.local/state/input-menu-enable.json"
 CTL=(org.fcitx.Fcitx5 /controller org.fcitx.Fcitx.Controller1)
 fcitx_running() { busctl --user --auto-start=no call "${CTL[@]}" State >/dev/null 2>&1; }
+# Only real paths are removed: a symlinked ancestor (or file) could redirect the removal anywhere the user can reach.
+linked_path() { local p=$1 h=${HOME%/}; while [[ $p == "$h"/* ]]; do [[ -L $p ]] && return 0; p=${p%/*}; done; return 1; }
+for managed in DROPIN STATE; do
+  if linked_path "${!managed}"; then
+    echo "Skipping symlinked path, left as it is (move or unlink it): ${!managed}" >&2
+    printf -v "$managed" '%s' /nonexistent-input-menu-skip
+  fi
+done
 
 if [[ -f $DROPIN ]]; then
   rm "$DROPIN"

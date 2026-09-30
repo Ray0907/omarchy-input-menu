@@ -35,11 +35,18 @@ CTL=(org.fcitx.Fcitx5 /controller org.fcitx.Fcitx.Controller1)
 GLYPHS=(prev next arrow radio)
 
 under_home() { local h=${HOME%/}; [[ $1 == "$h/"* && $1 != */../* && $1 != */.. ]]; }
+# True when the path, or any directory between HOME and it, is a symlink. Managed files are only written or removed
+# on real paths: a linked ancestor could redirect the write or the cleanup anywhere the user can reach.
+linked_path() { local p=$1 h=${HOME%/}; while [[ $p == "$h"/* ]]; do [[ -L $p ]] && return 0; p=${p%/*}; done; return 1; }
+safe_path() {
+  under_home "$1" || { echo "Refusing path outside HOME: $1" >&2; return 1; }
+  ! linked_path "$1" || { echo "Refusing to use a symlinked path (move or unlink it): $1" >&2; return 1; }
+}
 remove_files() {
   local f
   for f; do
     under_home "$f" || { echo "Skipping removal outside HOME: $f" >&2; continue; }
-    [[ ! -L $f ]] || { echo "Skipping symlink: $f" >&2; continue; }
+    ! linked_path "$f" || { echo "Skipping symlinked path: $f" >&2; continue; }
     rm -f -- "$f"
   done
 }
@@ -78,21 +85,25 @@ cmd_apply() (
   for g in "${GLYPHS[@]}"; do
     [[ -f $RENDERED/input-menu-fcitx5-$g.svg ]] || { echo "incomplete candidate window theme render" >&2; return 1; }
   done
+  safe_path "$STATE_DIR" && safe_path "$DEST" || return 1
   mkdir -p "$STATE_DIR"
   # Lock the persistent directory, not a pathname that disable must remove.
   if command -v flock >/dev/null; then exec 9<"$STATE_DIR"; flock 9; fi
   [[ -f $STATE ]] || return 0 # A queued apply must not undo disable.
   mkdir -p "$DEST"
+  safe_path "$DEST" || return 1
   tmp=$(mktemp "$STATE_DIR/apply.XXXXXX") || return 1
   trap 'remove_files "$tmp" "$tmp.x"; [[ -z $publish ]] || remove_files "$publish"' EXIT
   cp "$conf" "$tmp"
   for g in "${GLYPHS[@]}"; do
     f="$RENDERED/input-menu-fcitx5-$g.svg"
     h=$(sha8 "$f")
+    safe_path "$DEST/$g-$h.svg" || return 1
     cmp -s "$f" "$DEST/$g-$h.svg" || cp "$f" "$DEST/$g-$h.svg"
     sed "s|^Image=$g\\.svg\$|Image=$g-$h.svg|" "$tmp" >"$tmp.x"
     mv -f "$tmp.x" "$tmp"
   done
+  safe_path "$DEST/theme.conf" || return 1
   if ! cmp -s "$tmp" "$DEST/theme.conf"; then
     publish=$(mktemp "$DEST/.theme.conf.XXXXXX")
     cp "$tmp" "$publish"
@@ -108,6 +119,7 @@ cmd_apply() (
 
 install_files() (
   local f tmp dest
+  safe_path "$STATE_DIR" && safe_path "$THEMED_DIR" && safe_path "$(dirname "$HOOK")" || return 1
   mkdir -p "$THEMED_DIR" "$(dirname "$HOOK")"
   for f in "$HERE"/theme/*.tpl; do
     dest="$THEMED_DIR/$(basename "$f")"
@@ -140,6 +152,7 @@ cmd_enable() {
     echo "Refusing theme-set hook: plugin must be under HOME and owned by the current user: $HERE" >&2
     return 1
   fi
+  safe_path "$STATE_DIR" || return 1
   mkdir -p "$STATE_DIR"
   if [[ ! -f $STATE ]]; then
     [[ $t == "$OURS" ]] && t=default          # never record our own name as the value to restore
@@ -147,7 +160,7 @@ cmd_enable() {
     jq -n --arg t "$t" --arg d "$d" '{previous:{Theme:$t,DarkTheme:$d}}' >"$STATE.tmp"
     mv -f "$STATE.tmp" "$STATE"
   fi
-  install_files
+  install_files || { echo "candidate window theme was not installed" >&2; return 1; }
   # Only newly rendered files can prove freshness; refresh may fail for unrelated reasons.
   remove_files "$RENDERED/input-menu-fcitx5.conf" "$RENDERED"/input-menu-fcitx5-*.svg
   omarchy-theme-refresh >/dev/null 2>&1 || true   # renders the templates for the current theme (and runs the hook)
@@ -175,10 +188,10 @@ cmd_disable() {
     set_theme "$t" "$d" || { echo "could not restore the previous theme" >&2; return 1; }
   fi
   remove_files "$THEMED_DIR"/input-menu-fcitx5*.tpl "$HOOK" "$STATE" "$STATE_DIR/lock"
-  if under_home "$DEST" && [[ $DEST == "${HOME%/}/"*/omarchy-input-menu ]]; then
+  if under_home "$DEST" && ! linked_path "$DEST" && [[ $DEST == "${HOME%/}/"*/omarchy-input-menu ]]; then
     rm -rf -- "$DEST"
   else
-    echo "Skipping removal outside HOME: $DEST" >&2
+    echo "Skipping removal of a path outside HOME or behind a symlink: $DEST" >&2
   fi
   reload
   echo "Input Menu no longer manages fcitx5's candidate window theme"

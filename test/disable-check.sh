@@ -96,5 +96,23 @@ check 'always down keeps artifacts' "$(cksum "$STATE" "$HOOK" "$TPL" "$D/theme.c
 check 'one deferred cleanup message' "$(grep -c 'Candidate-window theme cleanup deferred' "$T/output")" 1
 grep -qF "$T/scripts/theme disable" "$T/output" || { echo 'FAIL: deferred message lacks exact retry command'; fails=1; }
 [[ ! -e $T/activation ]] || { echo 'FAIL: D-Bus activation allowed'; fails=1; }
+
+# Linked systemd or state directories: disable leaves what they point at alone.
+tree_sum() { (cd "$1" && find . -type f | sort | while read -r f; do cksum "$f"; done); }
+for where in systemd state; do
+  reset; touch "$T/running"; rm -rf "$HOME/elsewhere"; mkdir -p "$HOME/elsewhere"
+  if [[ $where == systemd ]]; then
+    mkdir -p "$HOME/elsewhere/dropins"; cp -R "$HOME/.config/systemd/user/omarchy-fcitx5.service.d" "$HOME/elsewhere/dropins/"
+    rm -rf "$HOME/.config/systemd/user"; ln -s "$HOME/elsewhere/dropins" "$HOME/.config/systemd/user"
+  else
+    echo '{"addedHidden":false}' >"$HOME/elsewhere/input-menu-enable.json"
+    mv "$HOME/.local/state" "$HOME/elsewhere/state-old"; ln -s "$HOME/elsewhere" "$HOME/.local/state"
+  fi
+  tree_sum "$HOME/elsewhere" >"$T/elsewhere.before"
+  bash "$T/scripts/disable" >"$T/output" 2>&1
+  [[ $(<"$T/output") == *symlink* ]] || { echo "FAIL: disable linked $where gave no symlink notice: $(<"$T/output")"; fails=1; }
+  check "disable linked $where left target untouched" "$(tree_sum "$HOME/elsewhere")" "$(cat "$T/elsewhere.before")"
+  [[ $where != systemd ]] || ! grep -q 'systemctl --user restart' "$T/calls" || { echo 'FAIL: disable restarted fcitx5 for a linked drop-in'; fails=1; }
+done
 if (( fails )); then echo FAILED; exit 1; fi
 echo ok
