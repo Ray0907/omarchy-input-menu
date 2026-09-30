@@ -123,7 +123,15 @@ function shellQuote(path) {
   return "'" + String(path).replace(/'/g, "'\\''") + "'"
 }
 
+// Single instance: start `argv` only when no process command line matches `pattern`. The first character is
+// bracketed so the pattern argument does not match itself; the guard's own PID is ignored because its command
+// line also carries the launched command (which contains the same text).
+function guardedLaunch(pattern, argv) {
+  var p = String(pattern)
+  return ["sh", "-c", "pgrep -f -- \"$0\" | grep -qvx \"$$\" || exec \"$@\"", "[" + p.charAt(0) + "]" + p.slice(1)].concat(argv)
+}
+
 if (typeof module !== "undefined") {
   module.exports = { parseIconUrl: parseIconUrl, localeKey: localeKey, glyphFor: glyphFor, titleFor: titleFor,
-                     isKeyboard: isKeyboard, rows: rows, strings: strings, localFilePath: localFilePath, shellQuote: shellQuote, DEFAULT_HIDDEN_MODES: DEFAULT_HIDDEN_MODES }
+                     isKeyboard: isKeyboard, rows: rows, strings: strings, localFilePath: localFilePath, shellQuote: shellQuote, guardedLaunch: guardedLaunch, DEFAULT_HIDDEN_MODES: DEFAULT_HIDDEN_MODES }
 }

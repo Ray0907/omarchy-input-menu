@@ -73,6 +73,16 @@ Panel {
     Quickshell.execDetached(command)
   }
 
+  // One window per action: skip when the same command is already running, and ignore a second click within
+  // two seconds while the first is still starting (its window has no process to find yet).
+  property var lastLaunch: ({})
+  function launchOnce(pattern, command) {
+    var now = Date.now()
+    if (now - (lastLaunch[pattern] || 0) < 2000) return
+    lastLaunch[pattern] = now
+    launch(Model.guardedLaunch(pattern, command))
+  }
+
   function activate(index) {
     if (index < 0 || index >= rowCount) return
     if (index < rows.length) {
@@ -83,14 +93,14 @@ Panel {
     }
     var a = actionRows[index - rows.length]
     close()
-    if (a.id === "emoji") launch(["omarchy-menu-emoji"])
-    else if (a.id === "settings") launch(["fcitx5-configtool"])
+    if (a.id === "emoji") launchOnce("omarchy-menu-emoji", ["omarchy-menu-emoji"])
+    else if (a.id === "settings") launchOnce("fcitx5-configtool", ["fcitx5-configtool"])
     else if (a.id === "start") launch(["systemctl", "--user", "start", "omarchy-fcitx5"])
-    else if (a.id === "enable") launch(["omarchy-launch-floating-terminal-with-presentation",
+    else if (a.id === "enable") launchOnce("scripts/enable", ["omarchy-launch-floating-terminal-with-presentation",
                                                         Model.shellQuote(Model.localFilePath(Qt.resolvedUrl("scripts/enable")))])
-    else if (a.id === "installIm") launch(["omarchy-launch-floating-terminal-with-presentation",
+    else if (a.id === "installIm") launchOnce("scripts/add-engine", ["omarchy-launch-floating-terminal-with-presentation",
                                                         Model.shellQuote(Model.localFilePath(Qt.resolvedUrl("scripts/add-engine")))])
-    else if (a.id === "matchTheme") launch(["omarchy-launch-floating-terminal-with-presentation",
+    else if (a.id === "matchTheme") launchOnce("scripts/theme enable", ["omarchy-launch-floating-terminal-with-presentation",
                                                         Model.shellQuote(Model.localFilePath(Qt.resolvedUrl("scripts/theme"))) + " enable"])
   }
 

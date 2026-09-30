@@ -37,9 +37,9 @@ assert.ok(menuOpen && menuOpen[1].includes('themeProc.running = true'), 'theme s
 assert.equal((qml.match(/themeProc\.running\s*=/g) || []).length, 1, 'no other path starts theme status')
 assert.ok(!qml.includes('Timer {') && !/running:\s*true/.test(themeProcess), 'no timer or idle theme status launch')
 assert.ok(qml.includes('Model.shellQuote(Model.localFilePath(Qt.resolvedUrl("scripts/theme"))) + " enable"'), 'match theme passes the quoted path and enable to the presentation launcher')
-assert.ok(/a\.id === "matchTheme"\) launch\(\["omarchy-launch-floating-terminal-with-presentation",/.test(qml), 'match theme uses the same launcher as tray enable')
+assert.ok(/a\.id === "matchTheme"\) launchOnce\("scripts\/theme enable", \["omarchy-launch-floating-terminal-with-presentation",/.test(qml), 'match theme uses the same launcher as tray enable')
 assert.ok(qml.includes('Model.shellQuote(Model.localFilePath(Qt.resolvedUrl("scripts/add-engine")))'), 'install input methods passes a quoted local path to the launcher')
-assert.ok(/a\.id === "installIm"\) launch\(\["omarchy-launch-floating-terminal-with-presentation",/.test(qml), 'install input methods uses the same counted launcher as tray enable')
+assert.ok(/a\.id === "installIm"\) launchOnce\("scripts\/add-engine", \["omarchy-launch-floating-terminal-with-presentation",/.test(qml), 'install input methods uses the same counted launcher as tray enable')
 assert.equal((qml.match(/Qt\.resolvedUrl\("scripts\/add-engine"\)/g) || []).length, 1, 'add-engine is referenced only by its action launcher')
 assert.ok(!qml.includes('str.addIm'), 'the configtool-only single-input-method action is gone')
 const extrasBody = qml.match(/readonly property var extras: \{([\s\S]*?)\n  \}/)[1]
@@ -86,6 +86,10 @@ for (const hasConfigTool of [false, true]) {
   }
 }
 assert.ok(!/actionRows\.indexOf\(/.test(qml) && qml.includes('root.actionOrdinal(index)'), 'action row index comes from position, not object identity')
+for (const id of ["emoji", "settings", "enable", "installIm", "matchTheme"]) {
+  assert.ok(new RegExp('a\\.id === "' + id + '"\\) launchOnce\\(').test(qml), id + ' action starts through the single-instance guard')
+}
+assert.ok(!/a\.id === "[a-zA-Z]+"\) launch\(\[/.test(qml.replace(/a\.id === "start"\) launch\(/, "")), 'no action launches without the guard (except starting fcitx5)')
 const enable = require('node:fs').readFileSync('scripts/enable', 'utf8')
 const disable = require('node:fs').readFileSync('scripts/disable', 'utf8')
 assert.ok(enable.trimEnd().endsWith('"$(dirname "$0")/theme" enable --auto || true'), 'theme is best-effort after successful tray enable')

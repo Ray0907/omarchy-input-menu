@@ -123,4 +123,26 @@ assert.strictEqual(M.localFilePath("https://example.com/enable"), "")
 const path = "/tmp/input menu/o'hara;$HOME enable"
 assert.strictEqual(require("child_process").execFileSync("bash", ["-c", "printf '%s' " + M.shellQuote(path)], { encoding: "utf8" }), path)
 
+// Single instance: a second launch while the first is still running must not start anything.
+{
+  const cp = require("child_process"), fs = require("fs"), os = require("os"), pathm = require("path")
+  const dir = fs.mkdtempSync(pathm.join(os.tmpdir(), "guard-"))
+  const marker = pathm.join(dir, "ran"), unique = "guardtest-" + process.pid
+  const count = () => fs.existsSync(marker) ? fs.readFileSync(marker, "utf8").trim().split("\n").length : 0
+  const sleepMs = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+  // the child stays running as long as its argv contains the unique marker
+  const spawnChild = () => cp.spawn("sh", ["-c", "sleep 30; :", unique + "-child"], { detached: true, stdio: "ignore" })
+  const child = spawnChild()
+  sleepMs(300)
+  const g = M.guardedLaunch(unique + "-child", ["sh", "-c", "echo x >> \"$1\"", "sh", marker, unique + "-child"])  // the command line carries the pattern, like the real launches
+  cp.spawnSync(g[0], g.slice(1), { stdio: "ignore" })
+  assert.strictEqual(count(), 0, "guard blocks the launch while the same command is running")
+  process.kill(-child.pid); sleepMs(300)
+  cp.spawnSync(g[0], g.slice(1), { stdio: "ignore" })
+  assert.strictEqual(count(), 1, "guard launches when nothing is running")
+  // Linux pgrep -f also matches the guard itself (its command line carries the launched command); macOS hides that.
+  assert.ok(g.join(" ").includes('grep -qvx "$$"'), "guard ignores its own PID")
+  fs.rmSync(dir, { recursive: true })
+}
+
 console.log("ok")
