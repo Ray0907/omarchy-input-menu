@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.ray0907.input-menu",
   "name": "Input Menu",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "Ray0907",
   "license": "MIT",
   "description": "macOS-style input source menu for fcitx5: shows the current input method and mode, switches from a menu, updates instantly.",
