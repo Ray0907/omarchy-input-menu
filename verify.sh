@@ -717,6 +717,18 @@ menu_safe() {
   [[ $(hyprctl clients -j | jq length) -eq 0 ]] && [[ $(C menuOpen) == true ]]
 }
 menu_key() { menu_safe && wtype -k "$1"; }
+# Hidden modes and pointer hover can change the initial highlight.
+menu_select_row() {
+  local target=$1 current moves direction=Down i
+  [[ $target =~ ^[0-9]+$ ]] || return 1
+  if [[ $(field .cursorActive) != true ]]; then menu_key Down || return 1; fi
+  current=$(field .selectedIndex)
+  [[ $current =~ ^[0-9]+$ ]] || return 1
+  moves=$(( target - current ))
+  if (( moves < 0 )); then direction=Up; moves=$(( -moves )); fi
+  for ((i=0; i<moves; i++)); do menu_key "$direction" || return 1; done
+  [[ $(field .selectedIndex) == "$target" ]]
+}
 
 step 'model, panel and snapshot checks'
 node "$HERE/test/model-check.js" || bad model-check
@@ -768,6 +780,45 @@ echo "empty-desk: shell=$old_shell_pid->$new_shell_pid badge=$badge rows=${rows:
    $(file_hash "$HOME/.local/state/input-menu-modes.json") == "$mode_cache_before" &&
    $(jq -r .focused <<<"$fresh") == false && $(hyprctl clients -j | jq length) -eq 0 ]] ||
   { bad 'fresh empty desk has no badge or input-method rows'; exit 1; }
+
+step 'empty desk drops removed Mozc after fcitx5 restart'
+zero_clients || { bad 'client windows open before empty-desk group change'; exit 1; }
+restart_methods=$(jq -c '[.inputMethods[].icon]' <<<"$fresh")
+jq -e 'index("fcitx_mozc") != null' <<<"$restart_methods" >/dev/null || { bad 'Mozc missing before empty-desk restart'; exit 1; }
+restart_shell_pid=$(pgrep -f "^quickshell -n -p $OMARCHY_PATH/shell$" | head -1)
+restart_kept=$(jq -c '[.data[1][] | select(.[0] != "mozc")]' <<<"$original_info")
+mapfile -t restart_pairs < <(jq -r '.[] | .[0], .[1]' <<<"$restart_kept")
+group_changed=1
+busctl --user --auto-start=no call "${CTL[@]}" SetInputMethodGroupInfo 'ssa(ss)' "$original_group" "$original_layout" \
+  "$(( ${#restart_pairs[@]} / 2 ))" "${restart_pairs[@]}" || { bad 'remove Mozc for empty-desk restart'; exit 1; }
+for restart_stage in removed restored; do
+  if [[ $restart_stage == restored ]]; then
+    busctl --user --auto-start=no call "${CTL[@]}" SetInputMethodGroupInfo 'ssa(ss)' "$original_group" "$original_layout" \
+      "$(( ${#original_pairs[@]} / 2 ))" "${original_pairs[@]}" || { bad 'restore group after empty-desk restart'; exit 1; }
+    restart_expected=$restart_methods
+    restart_expected_pairs=$(jq -c '.data[1]' <<<"$original_info")
+  else
+    restart_expected=$(jq -c 'map(select(. != "fcitx_mozc"))' <<<"$restart_methods")
+    restart_expected_pairs=$restart_kept
+  fi
+  restart_info=$(busctl --user --auto-start=no --json=short call "${CTL[@]}" InputMethodGroupInfo s "$original_group")
+  [[ $(jq -r '.data[0]' <<<"$restart_info") == "$original_layout" &&
+     $(jq -c '.data[1]' <<<"$restart_info") == "$restart_expected_pairs" ]] || { bad 'empty-desk group order/layout mismatch'; exit 1; }
+  zero_clients || { bad 'client windows open before empty-desk restart'; exit 1; }
+  systemctl --user restart omarchy-fcitx5 || { bad 'empty-desk fcitx5 restart'; exit 1; }
+  restart_state='{}'
+  for ((i=0; i<40; i++)); do
+    restart_state=$(S 2>/dev/null || true)
+    if jq -e --argjson expected "$restart_expected" '.status == "ready" and .focused == false and
+      [.inputMethods[].icon] == $expected' <<<"$restart_state" >/dev/null 2>&1; then break; fi
+    sleep 0.25
+  done
+  echo "empty-desk $restart_stage: methods=$(jq -c '[.inputMethods[].icon]' <<<"$restart_state") focused=$(jq -r .focused <<<"$restart_state")"
+  jq -e --argjson expected "$restart_expected" '.status == "ready" and .focused == false and
+    [.inputMethods[].icon] == $expected' <<<"$restart_state" >/dev/null || { bad "stale input methods after empty-desk $restart_stage restart"; exit 1; }
+  zero_clients && [[ $(pgrep -f "^quickshell -n -p $OMARCHY_PATH/shell$" | head -1) == "$restart_shell_pid" ]] ||
+    { bad 'empty-desk check changed clients or restarted the shell'; exit 1; }
+done
 
 step 'guided install with installed engines'
 zero_clients || { bad 'client windows open before guided install'; exit 1; }
@@ -850,6 +901,16 @@ if open_test_window; then
     else [[ $got == "$im" ]] || bad "badge $im"; fi
   done
 
+  step 'default Hiragana menu has only ABC, Zhuyin and Hiragana'
+  C switchTo fcitx_mozc fcitx_mozc_hiragana >/dev/null; sleep 2
+  C open >/dev/null; sleep 0.7
+  default_menu=$(S)
+  echo "default Hiragana rows: $(jq -c '.rows' <<<"$default_menu")"
+  jq -e --arg kb "$KB" '[.rows[] | {im,mode}] == [
+    {im:$kb,mode:""}, {im:"fcitx-chewing",mode:""}, {im:"fcitx_mozc",mode:"fcitx_mozc_hiragana"}] and
+    .currentMode == "fcitx_mozc_hiragana" and .rows[2].checked' <<<"$default_menu" >/dev/null || bad 'default Hiragana menu exposes extra or wrong rows'
+  C close >/dev/null
+
   step 'menu screenshot in Katakana'
   C switchTo fcitx_mozc fcitx_mozc_katakana_full >/dev/null; sleep 2
   C open >/dev/null; sleep 0.8; screenshot menu; C close >/dev/null
@@ -891,6 +952,8 @@ step 'keyboard navigation and Enter-on-open (zero clients only)'
 if [[ $(hyprctl clients -j | jq length) -eq 0 ]]; then
   C open >/dev/null; sleep 0.7
   if menu_safe; then
+    S | jq -e '.selectedIndex >= 0 and .selectedIndex < (.rows | length)' >/dev/null ||
+      { bad 'Enter-on-open would activate a footer action'; exit 1; }
     menu_key Return || bad 'Enter-on-open key guard'
     sleep 0.5
     echo "enter-open: menu=$(C menuOpen) pending=$(field .pendingIm)"
@@ -898,45 +961,51 @@ if [[ $(hyprctl clients -j | jq length) -eq 0 ]]; then
     sleep 11
     C open >/dev/null; sleep 0.7
     if menu_safe; then
-      if ! menu_key Down || ! menu_key Down; then bad 'keyboard arrow guard'; fi
+      menu_key Down || { bad 'keyboard arrow guard'; exit 1; }
+      target_index=$(S | jq -r '[.rows[].im == "fcitx-chewing"] | index(true) // empty')
+      menu_select_row "$target_index" || { bad 'keyboard arrow/highlight guard'; exit 1; }
       screenshot menu-keyboard
       if menu_safe; then menu_key Return || bad 'keyboard Enter guard'; fi
       sleep 0.5
       echo "arrows-enter: menu=$(C menuOpen) pending=$(field .pendingIm)"
-      [[ $(C menuOpen) == false && -n $(field .pendingIm) ]] || bad 'arrows/Enter did not select row'
+      [[ $(C menuOpen) == false && $(field .pendingIm) == fcitx-chewing ]] || bad 'arrows/Enter did not select Zhuyin'
       sleep 11
     else skips+=(menu-keys); echo 'SKIP: menu keys (menu no longer open or another client exists)'; C close >/dev/null; fi
   else skips+=(menu-keys); echo 'SKIP: menu keys (menu not open or another client exists)'; C close >/dev/null; fi
 else skips+=(menu-keys); echo 'SKIP: menu keys (other client windows exist)'; fi
 
-step 'Katakana selected by menu keyboard, then typed into a new window'
+step 'Hiragana selected by menu keyboard from active Katakana, then typed into a new window'
 if [[ $(hyprctl clients -j | jq length) -eq 0 ]]; then
+  if open_test_window; then
+    C switchTo fcitx_mozc fcitx_mozc_katakana_full >/dev/null; sleep 2
+    close_test_window || { bad 'close active Katakana setup window'; exit 1; }
+  else bad 'active Katakana setup window not focused'; exit 1; fi
   C open >/dev/null; sleep 0.7
   if menu_safe; then
-    target_index=$(S | jq -r '[.rows[].mode == "fcitx_mozc_katakana_full"] | index(true) // empty')
-    if [[ -z $target_index ]]; then bad 'Katakana menu row missing'; exit 1; fi
-    if [[ $(field .cursorActive) != true ]]; then menu_key Down || bad 'activate keyboard cursor'; fi
-    current_index=$(field .selectedIndex)
-    row_count=$(S | jq '.rows | length')
-    moves=$(( (target_index - current_index + row_count) % row_count ))
-    for ((i=0; i<moves; i++)); do menu_key Down || { bad 'Katakana arrow guard'; break; }; done
-    [[ $(field .selectedIndex) == "$target_index" ]] || bad 'Katakana keyboard highlight'
-    screenshot menu-keyboard-katakana
-    if menu_safe; then menu_key Return || bad 'Katakana Enter guard'; fi
+    active_menu=$(S)
+    jq -e '.currentIm == "fcitx_mozc" and .currentMode == "fcitx_mozc_katakana_full" and
+      any(.rows[]; .im == "fcitx_mozc" and .mode == "fcitx_mozc_katakana_full" and .checked)' <<<"$active_menu" >/dev/null ||
+      { bad 'active hidden Katakana row missing or unchecked'; exit 1; }
+    echo "active Katakana rows: $(jq -c '.rows' <<<"$active_menu")"
+    target_index=$(jq -r '[.rows[].mode == "fcitx_mozc_hiragana"] | index(true) // empty' <<<"$active_menu")
+    if [[ -z $target_index ]]; then bad 'Hiragana menu row missing'; exit 1; fi
+    menu_select_row "$target_index" || { bad 'Hiragana arrow/highlight guard'; exit 1; }
+    screenshot menu-keyboard-hiragana
+    if menu_safe; then menu_key Return || bad 'Hiragana Enter guard'; fi
     sleep 0.5
-    echo "menu-katakana: open=$(C menuOpen) im=$(field .pendingIm) mode=$(field .pendingMode)"
+    echo "menu-hiragana: open=$(C menuOpen) im=$(field .pendingIm) mode=$(field .pendingMode)"
     [[ $(C menuOpen) == false && $(field .pendingIm) == fcitx_mozc &&
-       $(field .pendingMode) == fcitx_mozc_katakana_full ]] || bad 'Katakana menu selection'
+       $(field .pendingMode) == fcitx_mozc_hiragana ]] || bad 'Hiragana menu selection'
     if open_test_window; then
       sleep 2
-      type_line ka || bad 'typing after Katakana menu selection (focus check)'
-      close_test_window || bad 'close Katakana menu test window'
+      type_line ka || bad 'typing after Hiragana menu selection (focus check)'
+      close_test_window || bad 'close Hiragana menu test window'
       last=$(tail -n 1 "$TYPED")
-      echo "menu-katakana typed: [$last]"
-      [[ $last == カ ]] || bad 'Katakana menu selection typed the wrong text'
-    else bad 'Katakana menu test window not focused'; fi
-  else skips+=(menu-Katakana); echo 'SKIP: Katakana menu selection (menu not open or another client exists)'; C close >/dev/null; fi
-else skips+=(menu-Katakana); echo 'SKIP: Katakana menu selection (other client windows exist)'; fi
+      echo "menu-hiragana typed: [$last]"
+      [[ $last == か ]] || bad 'Hiragana menu selection typed the wrong text'
+    else bad 'Hiragana menu test window not focused'; fi
+  else skips+=(menu-Hiragana); echo 'SKIP: Hiragana menu selection (menu not open or another client exists)'; C close >/dev/null; fi
+else skips+=(menu-Hiragana); echo 'SKIP: Hiragana menu selection (other client windows exist)'; fi
 
 step 'mouse selection (zero clients and menu open only)'
 if [[ $(hyprctl clients -j | jq length) -eq 0 ]]; then

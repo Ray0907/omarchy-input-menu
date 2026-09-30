@@ -63,10 +63,22 @@ const cache = { fcitx_mozc: [
   { icon: "fcitx_mozc_alpha_half", text: "Half ASCII" },
   { icon: "fcitx_mozc_katakana_half", text: "Half Katakana" },
 ] }
-const r = M.rows(ims, cache, M.DEFAULT_HIDDEN_MODES, "fcitx_mozc_katakana_full", "zh-TW")
-assert.deepStrictEqual(r.map(x => x.title), ["ABC", "注音", "平假名", "片假名", "英數"])
-assert.deepStrictEqual(r.map(x => x.checked), [false, false, false, true, false])
-assert.deepStrictEqual(r[3], { im: "fcitx_mozc", mode: "fcitx_mozc_katakana_full", glyph: "ア", title: "片假名", checked: true })
+const r = M.rows(ims, cache, M.DEFAULT_HIDDEN_MODES, "fcitx_mozc_hiragana", "zh-TW")
+assert.deepStrictEqual(r.map(x => x.title), ["ABC", "注音", "平假名"])
+assert.deepStrictEqual(r.map(x => x.checked), [false, false, true])
+// A hidden mode still shows, checked, while it is the active one.
+const rk = M.rows(ims, cache, M.DEFAULT_HIDDEN_MODES, "fcitx_mozc_katakana_full", "zh-TW")
+assert.deepStrictEqual(rk.map(x => x.title), ["ABC", "注音", "平假名", "片假名"])
+assert.deepStrictEqual(rk.map(x => x.checked), [false, false, false, true])
+assert.deepStrictEqual(rk[3], { im: "fcitx_mozc", mode: "fcitx_mozc_katakana_full", glyph: "ア", title: "片假名", checked: true })
+// The engine's idle Direct mode stays hidden even while active.
+const rd = M.rows(ims, cache, M.DEFAULT_HIDDEN_MODES, "fcitx_mozc_direct", "en")
+assert.deepStrictEqual(rd.map(x => x.title), ["ABC", "Zhuyin", "Hiragana"])
+// With the idle Direct mode hidden, the active engine still has exactly one checked row.
+assert.deepStrictEqual(rd.map(x => x.checked), [false, false, true])
+// A hidden mode of an input method that is not the current one stays hidden.
+const rn = M.rows([{ icon: "fcitx_mozc", text: "Mozc", checked: false }], cache, M.DEFAULT_HIDDEN_MODES, "fcitx_mozc_katakana_full", "en")
+assert.deepStrictEqual(rn.map(x => x.title), ["Hiragana"])
 assert.strictEqual(r[0].mode, "")
 
 // Without cached modes the engine is one row, checked by the input method.

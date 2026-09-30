@@ -238,6 +238,7 @@ Item {
       iconName = ""
       checkController()
     } else {
+      if (trayItem && !hasFocusedWindow) hasValidSnapshot = false
       if (trayItem || hasFocusedWindow) refresh()
       if (!trayItem) checkController()
     }

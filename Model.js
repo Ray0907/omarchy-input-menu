@@ -33,7 +33,8 @@ var KNOWN = {
 }
 var ABC = { glyph: "A", en: "ABC", "zh-TW": "ABC", ja: "ABC" }
 
-var DEFAULT_HIDDEN_MODES = ["fcitx_mozc_direct", "fcitx_mozc_alpha_full", "fcitx_mozc_katakana_half"]
+var DEFAULT_HIDDEN_MODES = ["fcitx_mozc_direct", "fcitx_mozc_alpha_full", "fcitx_mozc_katakana_half",
+                            "fcitx_mozc_katakana_full", "fcitx_mozc_alpha_half"]
 
 function isKeyboard(icon) {
   var s = String(icon || "")
@@ -65,15 +66,19 @@ function rows(ims, modeCache, hidden, currentMode, locale) {
   ;(ims || []).forEach(function (im) {
     var cached = cache[im.icon]
     var modes = (Array.isArray(cached) ? cached : []).filter(function (m) {
-      return m && typeof m.icon === "string" && hide.indexOf(m.icon) === -1
+      return m && typeof m.icon === "string" &&
+             (hide.indexOf(m.icon) === -1 ||
+              (!!im.checked && m.icon === currentMode && m.icon !== "fcitx_mozc_direct"))
     })
     if (modes.length === 0) {
       out.push({ im: im.icon, mode: "", glyph: glyphFor(im.icon, im.text), title: titleFor(im.icon, locale, im.text), checked: !!im.checked })
       return
     }
+    // The active engine always has one checked row, even when its active mode (idle Direct) is hidden.
+    var active = !!im.checked && modes.some(function (m) { return m.icon === currentMode }) ? currentMode : modes[0].icon
     modes.forEach(function (m) {
       out.push({ im: im.icon, mode: m.icon, glyph: glyphFor(m.icon, m.text), title: titleFor(m.icon, locale, m.text),
-                 checked: !!im.checked && m.icon === currentMode })
+                 checked: !!im.checked && m.icon === active })
     })
   })
   return out
