@@ -1,0 +1,185 @@
+#!/bin/bash
+# Install fcitx5 input methods and append them to the current input method group.
+#
+# usage: add-engine                                          interactive (gum)
+#        add-engine --engines P[,P…] [--ims N[,N…]] [--yes]   scripted (no gum)
+#
+# Failure cases:
+# 1. Installation fails: stop before restarting fcitx5 or touching the group.
+# 2. Restart declined: packages stay installed, group unchanged, say how to finish.
+# 3. A package's input method is not loaded: report and skip it.
+# 4. Existing group entries, order and layouts are preserved; no duplicate additions.
+# 5. Never D-Bus-activate fcitx5; only the user unit starts it.
+# 6. Only built-in packages are accepted; omarchy-pkg-add prompts for privileges.
+# 7. Inactive user unit: refuse before any change.
+# 8. Already installed, loaded and in the group: no restart or write.
+# 9. Group read/write/verification fails: report; packages stay, rerun is safe.
+set -uo pipefail
+
+CATALOG='fcitx5-chewing|Zhuyin 注音 (Traditional Chinese)|
+fcitx5-chinese-addons|Pinyin, Shuangpin, Cangjie, Wubi… (Chinese)|pinyin
+fcitx5-mozc|Japanese 日本語 (Mozc)|
+fcitx5-hangul|Korean 한국어|
+fcitx5-unikey|Vietnamese Tiếng Việt|'
+CTL=(org.fcitx.Fcitx5 /controller org.fcitx.Fcitx.Controller1)
+
+bus() { busctl --user --auto-start=no "$@"; }
+fcitx_up() { bus call "${CTL[@]}" State >/dev/null 2>&1; }
+packages() { printf '%s\n' "$CATALOG" | cut -d'|' -f1; }
+field() { printf '%s\n' "$CATALOG" | awk -F'|' -v p="$1" -v n="$2" '$1==p{print $n}'; }
+in_catalog() { packages | grep -qxF -- "$1"; }
+installed() { pacman -Q "$1" >/dev/null 2>&1; }
+pkg_ims() { pacman -Ql "$1" 2>/dev/null | sed -n 's|.* /usr/share/fcitx5/inputmethod/\([^/]*\)\.conf$|\1|p'; }
+contains() { case " $1 " in *" $2 "*) return 0 ;; esac; return 1; }
+
+available() { bus --json=short call "${CTL[@]}" AvailableInputMethods 2>/dev/null | jq -r '.data[0][][0]'; }
+
+read_group() {
+  GROUP=$(bus --json=short call "${CTL[@]}" CurrentInputMethodGroup | jq -er '.data[0] | select(type == "string" and length > 0)') || return 1
+  local info; info=$(bus --json=short call "${CTL[@]}" InputMethodGroupInfo s "$GROUP") || return 1
+  jq -e '(.data[0] | type == "string") and (.data[1] | type == "array") and
+    all(.data[1][]; type == "array" and length == 2 and all(.[]; type == "string"))' <<<"$info" >/dev/null || return 1
+  GROUP_LAYOUT=$(jq -r '.data[0]' <<<"$info") || return 1
+  GROUP_ENTRIES=$(jq -r '.data[1][] | "\(.[0])\t\(.[1])"' <<<"$info") || return 1
+}
+write_group() {   # $1: lines "name<TAB>layout"
+  local n=0 name layout; local -a args=()
+  while IFS=$'\t' read -r name layout; do
+    [[ -n $name ]] || continue
+    args+=("$name" "$layout"); n=$((n + 1))
+  done <<<"$1"
+  bus call "${CTL[@]}" SetInputMethodGroupInfo 'ssa(ss)' "$GROUP" "$GROUP_LAYOUT" "$n" "${args[@]}" >/dev/null
+}
+
+restart_fcitx() {
+  bus call "${CTL[@]}" Exit >/dev/null 2>&1 || true
+  sleep 1
+  systemctl --user restart omarchy-fcitx5 || return 1
+  for _ in $(seq 20); do fcitx_up && return 0; sleep 0.5; done
+  return 1
+}
+confirm_restart() {
+  ((YES)) && return 0
+  if ((INTERACTIVE)); then gum confirm "Restart fcitx5 now?"
+  else
+    local reply
+    read -r -p "Restart fcitx5 now? [y/N] " reply && [[ $reply == [yY] || $reply == [yY][eE][sS] ]]
+  fi
+}
+usage() { echo "usage: add-engine [--engines P[,P…]] [--ims N[,N…]] [--yes]" >&2; exit 2; }
+
+ENGINES="" IMS="" YES=0
+while (($#)); do
+  case "$1" in
+    --engines|--ims)
+      (($# >= 2)) && [[ -n $2 && $2 != -* ]] || usage
+      [[ $2 != ,* && $2 != *, && $2 != *,,* && $2 != *[[:space:]]* ]] || usage
+      value=$(printf '%s' "$2" | tr ',' ' ')
+      if [[ $1 == --engines ]]; then ENGINES=$value; else IMS=$value; fi
+      shift 2 ;;
+    --yes) YES=1; shift ;;
+    *) usage ;;
+  esac
+done
+INTERACTIVE=0
+BOXES=(--cursor-prefix "[ ] " --unselected-prefix "[ ] " --selected-prefix "[x] ")
+[[ -z $ENGINES ]] && INTERACTIVE=1
+[[ -z $IMS || -n $ENGINES ]] || usage
+
+if ((INTERACTIVE)); then
+  rows=""; p=""; state=""
+  for p in $(packages); do
+    state="not installed"; installed "$p" && state="installed"
+    rows="$rows$(field "$p" 2)  [$state]"$'\n'
+  done
+  header="Press x to tick [x], Enter to install"
+  while [[ -z ${ENGINES// /} ]]; do
+    picked=$(printf '%s' "$rows" | gum choose --no-limit "${BOXES[@]}" --header "$header") || exit 0
+    for p in $(packages); do
+      case "$picked" in *"$(field "$p" 2)  ["*) ENGINES="$ENGINES $p" ;; esac
+    done
+    if [[ -z ${ENGINES// /} ]]; then
+      header="Tick at least one with x, then Enter (Esc cancels)"
+      echo "Tick at least one language with x before pressing Enter."
+    fi
+  done
+fi
+[[ -n ${ENGINES// /} ]] || { echo "Nothing selected."; exit 0; }
+for p in $ENGINES; do in_catalog "$p" || { echo "Not a supported package: $p" >&2; exit 2; }; done
+
+systemctl --user is-active --quiet omarchy-fcitx5 || { echo "fcitx5 is not running under the omarchy-fcitx5 user service; nothing was changed." >&2; exit 1; }
+
+missing=""
+for p in $ENGINES; do installed "$p" || contains "$missing" "$p" || missing="$missing $p"; done
+if [[ -n ${missing// /} ]]; then
+  echo "Installing:$missing"
+  # shellcheck disable=SC2086
+  omarchy-pkg-add $missing || { echo "Installation failed; nothing else was changed." >&2; exit 1; }
+fi
+
+want=""
+for p in $ENGINES; do
+  ims=$(pkg_ims "$p" | tr '\n' ' ') || { echo "Could not list input methods in $p." >&2; exit 1; }
+  if [[ -z ${ims// /} ]]; then echo "No input methods found in $p." >&2; continue; fi
+  # shellcheck disable=SC2086
+  count=$(printf '%s\n' $ims | wc -l | tr -d ' ')
+  if [[ -n ${IMS// /} ]]; then
+    for n in $ims; do contains "$IMS" "$n" && want="$want $n"; done
+  elif ((count > 3)); then
+    rec=$(field "$p" 3)
+    if ((INTERACTIVE)); then
+      sel=()
+      [[ -n $rec ]] && sel=(--selected "$rec")
+      # shellcheck disable=SC2086
+      picked=$(printf '%s\n' $ims | gum choose --no-limit "${BOXES[@]}" "${sel[@]}" --header "Which $p input methods? x ticks, Enter confirms") || picked=""
+      for n in $picked; do want="$want $n"; done
+    else
+      [[ -n $rec ]] && want="$want $rec"
+      echo "$p has $count input methods; adding only '${rec:-none}' (use --ims to choose)."
+    fi
+  else
+    want="$want $ims"
+  fi
+done
+[[ -n ${want// /} ]] || { echo "Already set up: nothing to add."; exit 0; }
+
+read_group || { echo "Could not read the fcitx5 input method group." >&2; exit 1; }
+loaded=$(available | tr '\n' ' ') || { echo "Could not read fcitx5's available input methods." >&2; exit 1; }
+needRestart=0
+for n in $want; do contains "$loaded" "$n" || needRestart=1; done
+if ((needRestart)); then
+  windows=$(hyprctl clients -j 2>/dev/null | jq 'length' 2>/dev/null || echo 0)
+  echo "fcitx5 has to restart once to load the new input methods. $windows window(s) are open; they may need to be refocused or reopened afterwards."
+  if ! confirm_restart; then
+    echo "Restart declined. The packages stay installed; run this again to finish."
+    exit 0
+  fi
+  restart_fcitx || { echo "fcitx5 did not come back; start it and run this again." >&2; exit 1; }
+  read_group || { echo "Could not read the fcitx5 input method group." >&2; exit 1; }
+  loaded=$(available | tr '\n' ' ') || { echo "Could not read fcitx5's available input methods." >&2; exit 1; }
+fi
+
+inGroup=$(printf '%s\n' "$GROUP_ENTRIES" | cut -f1 | tr '\n' ' ')
+add=""; usable=0
+for n in $want; do
+  if contains "$loaded" "$n"; then
+    usable=1
+    contains "$inGroup" "$n" || contains "$add" "$n" || add="$add $n"
+  else echo "Skipped (not loaded by fcitx5): $n"; fi
+done
+((usable)) || { echo "Nothing could be added." >&2; exit 1; }
+[[ -n ${add// /} ]] || { echo "Already set up: everything you chose is in the input method group."; exit 0; }
+
+entries="$GROUP_ENTRIES"
+for n in $add; do
+  [[ -z $entries ]] || entries+=$'\n'
+  entries+="$n"$'\t'
+done
+expected_group=$GROUP expected_layout=$GROUP_LAYOUT
+write_group "$entries" || { echo "Could not update the fcitx5 input method group; run this again." >&2; exit 1; }
+read_group || { echo "Could not verify the fcitx5 input method group; run this again." >&2; exit 1; }
+[[ $GROUP == "$expected_group" && $GROUP_LAYOUT == "$expected_layout" && $GROUP_ENTRIES == "$entries" ]] || {
+  echo "fcitx5 did not keep the requested group entries and layouts; run this again." >&2; exit 1;
+}
+echo "Added to the input method group:$add"
+echo "Switch with the badge menu or Ctrl+Space."
