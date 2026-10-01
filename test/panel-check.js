@@ -22,7 +22,7 @@ const cacheErrors = []
 for (const key of ['__proto__', 'constructor', 'prototype']) {
   let saved = ''
   const ctx = { modeCache: {}, cacheReady: false, cacheDirty: false, primary: true,
-    rememberModes() {}, cacheFile: { setText(text) { saved = text } } }
+    rememberModes() {}, saveCache(text) { saved = text } }
   const raw = JSON.stringify(Object.fromEntries([[key, [{ icon: 'x', text: 'X' }]], ['fcitx_mozc', [{ icon: 'y', text: 'Y' }]]]))
   loadCache(ctx, require('../Model.js'), raw, false)
   try {
@@ -113,10 +113,11 @@ for (const id of ["emoji", "settings", "enable", "installIm", "matchTheme"]) {
   assert.ok(new RegExp('a\\.id === "' + id + '"\\) launchOnce\\(').test(qml), id + ' action starts through the single-instance guard')
 }
 assert.ok(!/a\.id === "[a-zA-Z]+"\) launch\(\[/.test(qml.replace(/a\.id === "start"\) launch\(/, "")), 'no action launches without the guard (except starting fcitx5)')
+assert.ok(!source.includes('cacheFile.setText') && source.includes('function saveCache(text)') && source.includes('scripts/save-modes'), 'the mode cache is written by scripts/save-modes (real paths, exclusive temporary file), never by FileView, which follows a symlink at its path')
 const enable = require('node:fs').readFileSync('scripts/enable', 'utf8')
 const disable = require('node:fs').readFileSync('scripts/disable', 'utf8')
-assert.ok(enable.trimEnd().endsWith('"$(dirname "$0")/theme" enable --auto || true'), 'theme is best-effort after successful tray enable')
-assert.ok(disable.indexOf('"$(dirname "$0")/theme" disable || theme_pending=1') > disable.indexOf('set -euo pipefail') && disable.indexOf('"$(dirname "$0")/theme" disable || theme_pending=1') < disable.indexOf('DROPIN='), 'theme disable records a non-fatal failure before tray teardown')
+assert.ok(enable.includes('"$SCRIPT_DIR/theme" enable --auto ||'), 'resolved sibling theme is best-effort after successful tray enable')
+assert.ok(disable.indexOf('"$SCRIPT_DIR/theme" disable || theme_pending=1') > disable.indexOf('set -euo pipefail') && disable.indexOf('"$SCRIPT_DIR/theme" disable || theme_pending=1') < disable.indexOf('DROPIN='), 'resolved sibling theme disable records a non-fatal failure before tray teardown')
 assert.ok(/onActivateRequested:\s*root\.activate\(root\.selectedIndex\)/.test(qml), 'Enter/Space activates the selected row without mouse or arrow')
 const verify = require('node:fs').readFileSync('verify.sh', 'utf8')
 assert.ok(verify.includes('REFUSE: close all client windows before testing'), 'cannot restart fcitx5 under an existing client input context')

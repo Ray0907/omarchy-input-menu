@@ -4,7 +4,7 @@
 # usage: theme status [--json] | enable [--auto] | disable | apply
 #
 # Failure cases:
-# 1. apply without ownership state or rendered files: exit 0, touch nothing.
+# 1. apply without ownership state: exit 0; incomplete/linked renders: fail without publishing.
 # 2. fcitx5 down: apply writes files and skips the reload; enable sets nothing,
 #    says so and records no state; disable refuses (exit 1) and removes nothing,
 #    because Theme would still name a folder that no longer exists.
@@ -17,7 +17,14 @@
 set -euo pipefail
 
 OURS=omarchy-input-menu
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT=${BASH_SOURCE[0]}
+while [[ -L $SCRIPT ]]; do
+  SCRIPT_DIR=$(cd "$(dirname "$SCRIPT")" && pwd)
+  SCRIPT=$(readlink "$SCRIPT")
+  [[ $SCRIPT == /* ]] || SCRIPT="$SCRIPT_DIR/$SCRIPT"
+done
+SCRIPT_DIR=$(cd "$(dirname "$SCRIPT")" && pwd)
+HERE=$(cd "$SCRIPT_DIR/.." && pwd)
 STATE_DIR="$HOME/.local/state/input-menu"
 RENDERED="$HOME/.local/state/omarchy/current/theme"
 THEME_ROOT="$HOME/.local/share/fcitx5/themes"
@@ -41,6 +48,9 @@ linked_path() { local p=$1 h=${HOME%/}; while [[ $p == "$h"/* ]]; do [[ -L $p ]]
 safe_path() {
   under_home "$1" || { echo "Refusing path outside HOME: $1" >&2; return 1; }
   ! linked_path "$1" || { echo "Refusing to use a symlinked path (move or unlink it): $1" >&2; return 1; }
+}
+refuse_directory() {
+  [[ ! -d $1 ]] || { echo "Refusing to replace a directory: $1" >&2; return 1; }
 }
 remove_files() {
   local f
@@ -80,34 +90,38 @@ state_of() {
 set_theme() { bus call "${CTL[@]}" SetConfig sv fcitx://config/addon/classicui 'a{sv}' 2 Theme s "$1" DarkTheme s "$2" >/dev/null; }
 
 cmd_apply() (
-  local conf="$RENDERED/input-menu-fcitx5.conf" g f h tmp publish=""
-  [[ -f $conf && -f $STATE ]] || return 0
-  for g in "${GLYPHS[@]}"; do
-    [[ -f $RENDERED/input-menu-fcitx5-$g.svg ]] || { echo "incomplete candidate window theme render" >&2; return 1; }
+  local conf="$RENDERED/input-menu-fcitx5.conf" g f h tmp="" sedtmp="" publish=""
+  [[ -f $STATE ]] || return 0
+  for f in "$conf" "$RENDERED/input-menu-fcitx5-prev.svg" "$RENDERED/input-menu-fcitx5-next.svg" "$RENDERED/input-menu-fcitx5-arrow.svg" "$RENDERED/input-menu-fcitx5-radio.svg"; do
+    [[ -f $f && ! -L $f ]] || { echo "incomplete candidate window theme render: $f must be a regular, non-symlink file" >&2; return 1; }
   done
   safe_path "$STATE_DIR" && safe_path "$DEST" || return 1
+  refuse_directory "$DEST/theme.conf" || return 1
   mkdir -p "$STATE_DIR"
   # Lock the persistent directory, not a pathname that disable must remove.
   if command -v flock >/dev/null; then exec 9<"$STATE_DIR"; flock 9; fi
   [[ -f $STATE ]] || return 0 # A queued apply must not undo disable.
   mkdir -p "$DEST"
   safe_path "$DEST" || return 1
+  trap '[[ -z $tmp ]] || remove_files "$tmp"; [[ -z $sedtmp ]] || remove_files "$sedtmp"; [[ -z $publish ]] || remove_files "$publish"' EXIT
   tmp=$(mktemp "$STATE_DIR/apply.XXXXXX") || return 1
-  trap 'remove_files "$tmp" "$tmp.x"; [[ -z $publish ]] || remove_files "$publish"' EXIT
+  sedtmp=$(mktemp "$STATE_DIR/apply.XXXXXX") || return 1
   cp "$conf" "$tmp"
   for g in "${GLYPHS[@]}"; do
     f="$RENDERED/input-menu-fcitx5-$g.svg"
     h=$(sha8 "$f")
     safe_path "$DEST/$g-$h.svg" || return 1
     cmp -s "$f" "$DEST/$g-$h.svg" || cp "$f" "$DEST/$g-$h.svg"
-    sed "s|^Image=$g\\.svg\$|Image=$g-$h.svg|" "$tmp" >"$tmp.x"
-    mv -f "$tmp.x" "$tmp"
+    sed "s|^Image=$g\\.svg\$|Image=$g-$h.svg|" "$tmp" >"$sedtmp"
+    mv -f "$sedtmp" "$tmp"
+    sedtmp=$(mktemp "$STATE_DIR/apply.XXXXXX") || return 1
   done
   safe_path "$DEST/theme.conf" || return 1
   if ! cmp -s "$tmp" "$DEST/theme.conf"; then
     publish=$(mktemp "$DEST/.theme.conf.XXXXXX")
     cp "$tmp" "$publish"
     chmod 644 "$publish"
+    refuse_directory "$DEST/theme.conf" || return 1
     mv -f "$publish" "$DEST/theme.conf"
   fi
   for f in "$DEST"/*.svg; do
@@ -118,25 +132,31 @@ cmd_apply() (
 )
 
 install_files() (
-  local f tmp dest
+  local f tmp="" dest
+  trap '[[ -z $tmp ]] || remove_files "$tmp"' EXIT
   safe_path "$STATE_DIR" && safe_path "$THEMED_DIR" && safe_path "$(dirname "$HOOK")" || return 1
   mkdir -p "$THEMED_DIR" "$(dirname "$HOOK")"
   for f in "$HERE"/theme/*.tpl; do
     dest="$THEMED_DIR/$(basename "$f")"
     [[ ! -L $dest ]] || { echo "Skipping symlink: $dest" >&2; continue; }
-    cmp -s "$f" "$dest" || install -m 644 "$f" "$dest"
+    cmp -s "$f" "$dest" && continue
+    tmp=$(mktemp "${dest%/*}/.input-menu.XXXXXX") || return 1
+    cp "$f" "$tmp" || return 1
+    chmod 644 "$tmp" || return 1
+    mv -f -- "$tmp" "$dest" || return 1
   done
-  [[ ! -L $HOOK ]] || { echo "Skipping symlink: $HOOK" >&2; return 0; }
-  tmp=$(mktemp "$STATE_DIR/hook.XXXXXX")
-  trap 'remove_files "$tmp"' EXIT
+  [[ ! -L $HOOK ]] || { echo "Refusing symlinked hook: $HOOK" >&2; return 1; }
+  tmp=$(mktemp "${HOOK%/*}/.input-menu.XXXXXX") || return 1
   # Never fail an Omarchy theme switch: the hook always exits 0.
-  printf '#!/bin/bash\n# Input Menu: keep the fcitx5 candidate window colors in step with the Omarchy theme.\n[[ -x %q && -O %q ]] && %q apply >/dev/null 2>&1\nexit 0\n' "$HERE/scripts/theme" "$HERE/scripts/theme" "$HERE/scripts/theme" >"$tmp"
-  cmp -s "$tmp" "$HOOK" || install -m 644 "$tmp" "$HOOK"
+  printf '#!/bin/bash\n# Input Menu: keep the fcitx5 candidate window colors in step with the Omarchy theme.\n[[ -x %q && -O %q ]] && %q apply >/dev/null 2>&1\nexit 0\n' "$HERE/scripts/theme" "$HERE/scripts/theme" "$HERE/scripts/theme" >"$tmp" || return 1
+  chmod 644 "$tmp" || return 1
+  cmp -s "$tmp" "$HOOK" || mv -f -- "$tmp" "$HOOK"
 )
 
 cmd_enable() {
-  local auto=0 st t d values
+  local auto=0 st t d values state_tmp
   [[ ${1:-} == --auto ]] && auto=1
+  refuse_directory "$STATE" && refuse_directory "$DEST/theme.conf" || return 1
   values=$(classicui) || return 1
   IFS=$'\t' read -r t d <<<"$values"
   st=$(state_of "$t" "$d")
@@ -157,8 +177,14 @@ cmd_enable() {
   if [[ ! -f $STATE ]]; then
     [[ $t == "$OURS" ]] && t=default          # never record our own name as the value to restore
     [[ $d == "$OURS" ]] && d=default-dark
-    jq -n --arg t "$t" --arg d "$d" '{previous:{Theme:$t,DarkTheme:$d}}' >"$STATE.tmp"
-    mv -f "$STATE.tmp" "$STATE"
+    # An exclusively created temporary file in the checked directory, renamed into place.
+    state_tmp=$(mktemp "$STATE_DIR/theme.json.XXXXXX") || return 1
+    if jq -n --arg t "$t" --arg d "$d" '{previous:{Theme:$t,DarkTheme:$d}}' >"$state_tmp" &&
+       refuse_directory "$STATE" && mv -f -- "$state_tmp" "$STATE"; then
+      :
+    else
+      rm -f -- "$state_tmp"; return 1
+    fi
   fi
   install_files || { echo "candidate window theme was not installed" >&2; return 1; }
   # Only newly rendered files can prove freshness; refresh may fail for unrelated reasons.

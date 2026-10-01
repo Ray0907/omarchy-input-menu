@@ -1,0 +1,26 @@
+#!/bin/bash
+# Save the engine mode cache (argument 1: a JSON object) to ~/.local/state/input-menu-modes.json.
+# Qt's file writer follows a symlink at its target path, so the QML side never writes this file itself.
+# Failure cases: the path or a directory above it (below HOME) is a symlink, or the target is a directory
+# (exit 1, nothing written); the argument is not a JSON object (exit 1, old cache kept); no argument (exit 2).
+set -euo pipefail
+
+FILE="$HOME/.local/state/input-menu-modes.json"
+DIR=${FILE%/*}
+
+linked_path() { local p=$1 h=${HOME%/}; while [[ $p == "$h"/* ]]; do [[ -L $p ]] && return 0; p=${p%/*}; done; return 1; }
+refuse_unsafe() {
+  if linked_path "$FILE"; then echo "Refusing to use a symlinked path (move or unlink it): $FILE" >&2; exit 1; fi
+  if [[ -d $FILE ]]; then echo "Refusing to replace a directory: $FILE" >&2; exit 1; fi
+}
+
+[[ $# -eq 1 ]] || { echo "usage: save-modes '<json object>'" >&2; exit 2; }
+jq -e 'type == "object"' <<<"$1" >/dev/null 2>&1 || { echo "Not a JSON object; cache left as it is" >&2; exit 1; }
+
+refuse_unsafe
+mkdir -p "$DIR"
+tmp=$(mktemp "$DIR/input-menu-modes.json.XXXXXX")
+trap 'rm -f -- "$tmp"' EXIT
+printf '%s\n' "$1" >"$tmp"
+refuse_unsafe
+mv -f -- "$tmp" "$FILE"

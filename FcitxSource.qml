@@ -272,6 +272,14 @@ Item {
     }
   }
 
+  // Qt's file writer follows a symlink at the target path, so the cache is saved by a script that refuses linked paths.
+  readonly property string saveModesPath: Model.localFilePath(Qt.resolvedUrl("scripts/save-modes"))
+  function saveCache(text) {
+    if (saveModesPath === "") return
+    processStarts += 1
+    Quickshell.execDetached([saveModesPath, text])
+  }
+
   function rememberModes() {
     if (!currentIm || Model.isKeyboard(currentIm) || modes.length === 0) return
     var list = modes.map(function (m) { return { icon: m.icon, text: m.text } })
@@ -280,7 +288,7 @@ Item {
     next[currentIm] = list
     modeCache = next
     if (!cacheReady) cacheDirty = true
-    else if (primary) cacheFile.setText(JSON.stringify(modeCache))
+    else if (primary) saveCache(JSON.stringify(modeCache))
   }
 
   function loadCache(raw, invalid) {
@@ -306,7 +314,7 @@ Item {
     modeCache = Object.assign({}, stored, modeCache)
     cacheReady = true
     rememberModes()
-    if (primary && (invalid || cacheDirty)) cacheFile.setText(JSON.stringify(modeCache))
+    if (primary && (invalid || cacheDirty)) saveCache(JSON.stringify(modeCache))
     cacheDirty = false
   }
 

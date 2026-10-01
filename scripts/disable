@@ -4,8 +4,16 @@
 # if fcitx5 was down, or report deferred cleanup after a bounded wait.
 set -euo pipefail
 
+SCRIPT=${BASH_SOURCE[0]}
+while [[ -L $SCRIPT ]]; do
+  SCRIPT_DIR=$(cd "$(dirname "$SCRIPT")" && pwd)
+  SCRIPT=$(readlink "$SCRIPT")
+  [[ $SCRIPT == /* ]] || SCRIPT="$SCRIPT_DIR/$SCRIPT"
+done
+SCRIPT_DIR=$(cd "$(dirname "$SCRIPT")" && pwd)
+
 theme_pending=0
-"$(dirname "$0")/theme" disable || theme_pending=1
+"$SCRIPT_DIR/theme" disable || theme_pending=1
 
 DROPIN="$HOME/.config/systemd/user/omarchy-fcitx5.service.d/zz-input-menu.conf"
 SHELL_JSON="$HOME/.config/omarchy/shell.json"
@@ -32,7 +40,7 @@ if [[ -f $DROPIN ]]; then
   if (( theme_pending )); then
     for _ in $(seq 20); do fcitx_running && break; sleep 0.5; done
     if fcitx_running; then
-      "$(dirname "$0")/theme" disable && theme_pending=0 || true
+      "$SCRIPT_DIR/theme" disable && theme_pending=0 || true
     fi
   fi
 fi
@@ -54,6 +62,6 @@ if [[ -f $STATE ]]; then
   rm "$STATE"
 fi
 if (( theme_pending )); then
-  printf 'Candidate-window theme cleanup deferred; run: %q disable\n' "$(cd "$(dirname "$0")" && pwd)/theme"
+  printf 'Candidate-window theme cleanup deferred; run: %q disable\n' "$SCRIPT_DIR/theme"
 fi
 echo "Input Menu's tray changes removed."

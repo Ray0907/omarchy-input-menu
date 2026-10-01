@@ -56,9 +56,17 @@ STUB
 REAL_MV="$(command -v mv)"; export REAL_MV
 cat >"$T/bin/mv" <<'STUB'
 #!/bin/bash
-for dest; do :; done
+a=("$@"); n=${#a[@]}; src=${a[n-2]}; dest=${a[n-1]}
+hook="$HOME/.config/omarchy/hooks/theme-set.d/input-menu"
+if [[ ${ATOMIC_INSTALL_CHECK:-} == 1 && ( $dest == "$hook" || $dest == *.tpl ) ]]; then
+  [[ ${src%/*} == "${dest%/*}" ]] || echo 'cross-directory publication' >>"$FAKE_LOG.atomic"
+  if [[ $dest == "$hook" ]]; then
+    [[ $(tail -1 "$src") == 'exit 0' ]] && bash -n "$src" || echo 'partial hook source' >>"$FAKE_LOG.atomic"
+    [[ ! -f $dest || $(tail -1 "$dest") == 'exit 0' ]] || echo 'partial old hook' >>"$FAKE_LOG.atomic"
+  fi
+  if [[ ${FAIL_INSTALL_PUBLISH:-} == hook && $dest == "$hook" || ${FAIL_INSTALL_PUBLISH:-} == tpl && $dest == *.tpl ]]; then exit 1; fi
+fi
 if [[ $dest == "$FCITX5_THEME_ROOT/omarchy-input-menu/theme.conf" ]]; then
-  src=$1; [[ $src == -f ]] && src=$2
   dir=${dest%/*}
   while IFS= read -r image; do
     [[ -f $dir/$image ]] || { echo "missing image $image" >>"$FAKE_LOG.order"; exit 1; }
@@ -70,8 +78,42 @@ if [[ $dest == "$FCITX5_THEME_ROOT/omarchy-input-menu/theme.conf" ]]; then
   fi
   [[ -n ${PUBLISH_FAIL:-} ]] && exit 1
 fi
-exec "$REAL_MV" "$@"
+"$REAL_MV" "$@"; rc=$?
+if [[ ${ATOMIC_INSTALL_CHECK:-} == 1 && $dest == "$hook" && $rc == 0 ]]; then
+  [[ $(tail -1 "$dest") == 'exit 0' ]] && bash -n "$dest" || echo 'partial published hook' >>"$FAKE_LOG.atomic"
+fi
+exit "$rc"
 STUB
+REAL_MKTEMP=$(command -v mktemp); export REAL_MKTEMP
+cat >"$T/bin/mktemp" <<'STUB'
+#!/bin/bash
+if [[ ${FAIL_SECOND_APPLY_TEMP:-} == 1 && $1 == "$INPUT_MENU_STATE_DIR/apply.XXXXXX" ]]; then
+  n=0; [[ ! -f $FAKE_LOG.mktemps ]] || n=$(<"$FAKE_LOG.mktemps")
+  n=$((n + 1)); echo "$n" >"$FAKE_LOG.mktemps"
+  (( n != 2 )) || exit 1
+fi
+exec "$REAL_MKTEMP" "$@"
+STUB
+REAL_INSTALL=$(command -v install); export REAL_INSTALL
+cat >"$T/bin/install" <<'STUB'
+#!/bin/bash
+for dest; do :; done
+if [[ ${ATOMIC_INSTALL_CHECK:-} == 1 && ( $dest == *.tpl || $dest == "$HOME/.config/omarchy/hooks/theme-set.d/input-menu" ) ]]; then
+  echo 'copy publication instead of same-directory rename' >>"$FAKE_LOG.atomic"
+  if [[ $dest == */theme-set.d/input-menu ]]; then
+    printf '#!/bin/bash\n' >"$dest"
+    [[ $(tail -1 "$dest") == 'exit 0' ]] || echo 'reader saw partial hook during copy' >>"$FAKE_LOG.atomic"
+  fi
+fi
+exec "$REAL_INSTALL" "$@"
+STUB
+printf() {
+  if [[ ${FAIL_HOOK_WRITE:-} == printf && $1 == '#!/bin/bash'* ]]; then
+    builtin printf '#!/bin/bash\n'; return 1
+  fi
+  builtin printf "$@"
+}
+export -f printf
 chmod +x "$T/bin/"*; export PATH="$T/bin:$PATH"
 
 mkdir -p "$HOME/plugin/scripts" "$HOME/plugin/theme"
@@ -328,7 +370,10 @@ echo '# keep hook' >"$T/custom-hook"
 ln -s "$T/custom.tpl" "$tpl"; ln -s "$T/custom-hook" "$hook"
 ln -s "$T/missing" "${tpl%/*}/input-menu-fcitx5-extra.tpl"
 before=$(cksum "$T/custom.tpl" "$T/custom-hook")
-out=$("$S" enable 2>&1); check 'symlink enable rc' "$?" 0
+out=$("$S" enable 2>&1); check 'symlink enable rc' "$?" 1
+[[ $out == *'candidate window theme was not installed'* ]] || { echo 'FAIL: linked hook did not stop enable'; fails=1; }
+check 'linked hook leaves selection' "$(cur)" 'default default-dark'
+[[ ! -e $OMARCHY_CURRENT_THEME_DIR/input-menu-fcitx5.conf && ! -e $D/theme.conf ]] || { echo 'FAIL: linked hook still rendered/applied theme'; fails=1; }
 [[ $out == *symlink* ]] || { echo 'FAIL: enable symlinks need warning'; fails=1; }
 [[ -L $tpl && -L $hook ]] || { echo 'FAIL: enable replaced symlinks'; fails=1; }
 out=$("$S" disable 2>&1); check 'symlink disable rc' "$?" 0
@@ -375,6 +420,83 @@ for what in themed hookdir; do
   check "enable linked $what left target untouched" "$(tree_sum "$HOME/elsewhere")" "$(cat "$T/elsewhere.before")"
 done
 reset
+
+# 19. Predictable temporary names are never followed: a planted theme.json.tmp symlink keeps its target.
+reset; colors '#7aa2f7' '#1a1b26' '#a9b1d6' '#292e42' '#414868'; setc default default-dark
+mkdir -p "$INPUT_MENU_STATE_DIR" "$HOME/elsewhere"; printf 'victim\n' >"$HOME/elsewhere/victim"
+ln -s "$HOME/elsewhere/victim" "$INPUT_MENU_STATE_DIR/theme.json.tmp"
+"$S" enable >/dev/null 2>&1; check "enable with planted .tmp link rc" "$?" 0
+check "planted .tmp link target untouched" "$(cat "$HOME/elsewhere/victim")" victim
+[[ -f $INPUT_MENU_STATE_DIR/theme.json ]] || { echo 'FAIL: state not recorded'; fails=1; }
+reset
+# No fixed-name temporary file is written anywhere in the shipped scripts.
+if grep -nE '>\s*"?\$STATE\.tmp|\$tmp\.x' "$HERE/scripts/theme" >/dev/null; then echo 'FAIL: scripts/theme writes a predictable temporary name'; fails=1; fi
+
+# Every rendered input must be a regular, non-symlink file.
+for suffix in conf prev.svg next.svg arrow.svg radio.svg missing-conf; do
+  reset; setc default default-dark; "$S" enable >/dev/null
+  before=$(tree_sum "$D")
+  colors '#ff0000' '#000000' '#ffffff' '#111111' '#222222'; omarchy-theme-refresh
+  if [[ $suffix == conf || $suffix == missing-conf ]]; then input="$OMARCHY_CURRENT_THEME_DIR/input-menu-fcitx5.conf"; else input="$OMARCHY_CURRENT_THEME_DIR/input-menu-fcitx5-$suffix"; fi
+  cp "$input" "$T/render-target"; rm "$input"
+  [[ $suffix == missing-conf ]] || ln -s "$T/render-target" "$input"
+  : >"$FAKE_LOG.reload"
+  out=$("$S" apply 2>&1); check "symlinked render $suffix exit" "$?" 1
+  [[ $out == *'incomplete candidate window theme render'* ]] || { echo "FAIL: render $suffix lacks reason"; fails=1; }
+  check "symlinked render $suffix leaves installed theme" "$(tree_sum "$D")" "$before"
+  [[ ! -s $FAKE_LOG.reload ]] || { echo "FAIL: render $suffix requested reload"; fails=1; }
+done
+
+# A chained symlink to theme resolves the real plugin/templates/hook script.
+reset; setc default default-dark; mkdir -p "$HOME/launchers"
+ln -s ../plugin/scripts/theme "$HOME/launchers/first"; ln -s first "$HOME/launchers/theme"
+"$HOME/launchers/theme" enable >"$T/output" 2>&1; check 'linked theme enable exit' "$?" 0
+grep -qF "$S" "$HOME/.config/omarchy/hooks/theme-set.d/input-menu" || { echo 'FAIL: linked theme hook points at wrong script'; fails=1; }
+
+# Final rename targets may not be directories.
+for target in state conf; do
+  reset; setc default default-dark
+  if [[ $target == state ]]; then
+    mkdir -p "$INPUT_MENU_STATE_DIR/theme.json"
+    echo keep >"$INPUT_MENU_STATE_DIR/theme.json/sentinel"
+    action=enable
+  else
+    "$S" enable >/dev/null
+    rm "$D/theme.conf"; mkdir "$D/theme.conf"; echo keep >"$D/theme.conf/sentinel"
+    action=apply
+  fi
+  before=$(find "$HOME/.config" "$HOME/.local" -type f -exec cksum {} \; 2>/dev/null | sort)
+  old_classicui=$(cur)
+  out=$("$S" "$action" 2>&1); check "directory $target exit" "$?" 1
+  [[ $out == *directory* ]] || { echo "FAIL: directory $target has no reason"; fails=1; }
+  check "directory $target leaves files" "$(find "$HOME/.config" "$HOME/.local" -type f -exec cksum {} \; 2>/dev/null | sort)" "$before"
+  check "directory $target leaves selection" "$(cur)" "$old_classicui"
+done
+
+# A second mktemp failure must not leak the first apply temporary file.
+reset; setc default default-dark; "$S" enable >/dev/null
+rm -f "$FAKE_LOG.mktemps"
+before=$(tree_sum "$D")
+FAIL_SECOND_APPLY_TEMP=1 "$S" apply >/dev/null 2>&1
+check 'second apply mktemp failure exit' "$?" 1
+check 'second mktemp failure cleans first temp' "$(count "$INPUT_MENU_STATE_DIR"/apply.*)" 0
+check 'second mktemp failure leaves theme' "$(tree_sum "$D")" "$before"
+
+# Hook/templates are only published as complete, same-directory renames.
+reset; setc default default-dark; export ATOMIC_INSTALL_CHECK=1
+mkdir -p "$HOME/.config/omarchy/hooks/theme-set.d"
+printf '#!/bin/bash\n# old complete hook\nexit 0\n' >"$HOME/.config/omarchy/hooks/theme-set.d/input-menu"
+"$S" enable >/dev/null 2>&1; check 'atomic install exit' "$?" 0
+[[ ! -e $FAKE_LOG.atomic ]] || { echo 'FAIL: non-atomic hook/template publication'; cat "$FAKE_LOG.atomic"; fails=1; }
+for kind in tpl hook printf; do
+  reset; setc default default-dark
+  FAIL_INSTALL_PUBLISH="$kind" FAIL_HOOK_WRITE="$kind" "$S" enable >/dev/null 2>&1
+  check "failed $kind publication exit" "$?" 1
+  leftovers=$(find "$HOME/.config/omarchy" -name '.input-menu.*' -type f)
+  check "failed $kind publication cleans temp" "$leftovers" ''
+  [[ $kind != printf || ! -e $HOME/.config/omarchy/hooks/theme-set.d/input-menu ]] || { echo 'FAIL: failed hook write published a partial hook'; fails=1; }
+done
+unset ATOMIC_INSTALL_CHECK
 
 # 17. Never D-Bus-activate fcitx5; publish only after all referenced files exist.
 [[ ! -e $FAKE_LOG.order ]] || { echo "FAIL: theme.conf published before images:"; cat "$FAKE_LOG.order"; fails=1; }

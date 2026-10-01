@@ -24,6 +24,14 @@
 # 15. Theme step failure never fails enable.
 set -euo pipefail
 
+SCRIPT=${BASH_SOURCE[0]}
+while [[ -L $SCRIPT ]]; do
+  SCRIPT_DIR=$(cd "$(dirname "$SCRIPT")" && pwd)
+  SCRIPT=$(readlink "$SCRIPT")
+  [[ $SCRIPT == /* ]] || SCRIPT="$SCRIPT_DIR/$SCRIPT"
+done
+SCRIPT_DIR=$(cd "$(dirname "$SCRIPT")" && pwd)
+
 DROPIN_DIR="$HOME/.config/systemd/user/omarchy-fcitx5.service.d"
 # Load after existing drop-ins such as replace.conf; leave them untouched.
 DROPIN="$DROPIN_DIR/zz-input-menu.conf"
@@ -122,12 +130,17 @@ fi
 
 # Only real paths are written: a symlinked ancestor (or file) could redirect the write anywhere the user can reach.
 linked_path() { local p=$1 h=${HOME%/}; while [[ $p == "$h"/* ]]; do [[ -L $p ]] && return 0; p=${p%/*}; done; return 1; }
-for managed in "$DROPIN" "$STATE"; do
-  if linked_path "$managed"; then
-    echo "Refusing to use a symlinked path (move or unlink it): $managed" >&2
-    exit 1
+refuse_directory() {
+  [[ ! -d $1 ]] || { echo "Refusing to replace a directory: $1" >&2; return 1; }
+}
+safe_write_path() {
+  if linked_path "$1"; then
+    echo "Refusing to use a symlinked path (move or unlink it): $1" >&2
+    return 1
   fi
-done
+  refuse_directory "$1"
+}
+for managed in "$DROPIN" "$STATE"; do safe_write_path "$managed" || exit 1; done
 
 sni=$(fcitx_sni)
 refresh=1
@@ -149,6 +162,7 @@ fi
 # shellcheck disable=SC2034  # published and restarted are read by the EXIT trap inside
 if [[ -z $sni || ( -f $DROPIN && $refresh == 1 ) ]]; then
   previous="" backup="" tmp="" rc=0 published=0 restarted=0
+  safe_write_path "$DROPIN" || exit 1
   mkdir -p "$DROPIN_DIR"
   if [[ -f $DROPIN ]]; then
     previous=$(<"$DROPIN")
@@ -156,7 +170,7 @@ if [[ -z $sni || ( -f $DROPIN && $refresh == 1 ) ]]; then
     cp -p "$DROPIN" "$backup"
   fi
   # Until fcitx5 is back with the tray interface, any failure restores the previous drop-in (or removes ours).
-  trap 'rc=$?; if [[ -n $backup ]]; then mv -f -- "$backup" "$DROPIN"; elif ((published)); then rm -f -- "$DROPIN"; fi; systemctl --user daemon-reload; if ((restarted)); then systemctl --user restart omarchy-fcitx5 || true; fi; [[ -z $tmp ]] || rm -f -- "$tmp"; exit "$rc"' EXIT
+  trap 'rc=$?; if [[ -n $backup ]]; then safe_write_path "$DROPIN" && mv -f -- "$backup" "$DROPIN" || true; elif ((published)); then rm -f -- "$DROPIN" || true; fi; systemctl --user daemon-reload || true; if ((restarted)); then systemctl --user restart omarchy-fcitx5 || true; fi; [[ -z $tmp ]] || rm -f -- "$tmp" || true; exit "$rc"' EXIT
   if [[ -n $backup ]]; then
     rm -- "$DROPIN"
     systemctl --user daemon-reload
@@ -170,9 +184,11 @@ if [[ -z $sni || ( -f $DROPIN && $refresh == 1 ) ]]; then
   new="[Service]
 ExecStart=
 ExecStart=$REPLY"
+  safe_write_path "$DROPIN" || exit 1
   tmp=$(mktemp "$DROPIN_DIR/.input-menu.XXXXXX")
   printf '%s\n' "$new" >"$tmp"
   chmod 644 "$tmp"
+  safe_write_path "$DROPIN" || exit 1
   mv -f -- "$tmp" "$DROPIN"
   published=1
   systemctl --user daemon-reload
@@ -196,6 +212,7 @@ if [[ -f $SHELL_JSON ]] && jq -e '[.bar.layout[]?[]? | select(.id == "omarchy.tr
   hidden=$(jq -c '[.bar.layout[]?[]? | select(.id == "omarchy.tray") | .hidden // []][0] | if type == "array" then . elif . == null then [] else [.] end' "$SHELL_JSON")
   if ! jq -e 'index("Fcitx")' <<<"$hidden" >/dev/null; then
     section=$(jq -r '.bar.layout | to_entries[] | select(any(.value[]?; .id == "omarchy.tray")) | .key' "$SHELL_JSON" | head -1)
+    safe_write_path "$STATE" || exit 1
     mkdir -p "$(dirname "$STATE")"
     state_backup=""
     if [[ -f $STATE ]]; then
@@ -203,8 +220,9 @@ if [[ -f $SHELL_JSON ]] && jq -e '[.bar.layout[]?[]? | select(.id == "omarchy.tr
       cp -p "$STATE" "$state_backup"
     fi
     state_tmp=$(mktemp "$STATE.XXXXXX")
-    trap 'rc=$?; if [[ -n $state_backup ]]; then mv -f -- "$state_backup" "$STATE"; else rm -f -- "$STATE"; fi; rm -f -- "$state_tmp"; exit "$rc"' EXIT
+    trap 'rc=$?; if [[ -n $state_backup ]]; then safe_write_path "$STATE" && mv -f -- "$state_backup" "$STATE" || true; else rm -f -- "$STATE" || true; fi; rm -f -- "$state_tmp" || true; exit "$rc"' EXIT
     printf '{"addedHidden":true}\n' >"$state_tmp"
+    safe_write_path "$STATE" || exit 1
     mv -f -- "$state_tmp" "$STATE"
     if ! omarchy-bar set omarchy.tray hidden "$(jq -c '. + ["Fcitx"]' <<<"$hidden")" --json --section "$section"; then
       echo "omarchy-bar set omarchy.tray hidden failed" >&2
@@ -214,13 +232,15 @@ if [[ -f $SHELL_JSON ]] && jq -e '[.bar.layout[]?[]? | select(.id == "omarchy.tr
     [[ -z $state_backup ]] || rm -f -- "$state_backup"
     echo "Hid the duplicate fcitx5 tray icon."
   elif [[ ! -f $STATE ]]; then
+    safe_write_path "$STATE" || exit 1
     mkdir -p "$(dirname "$STATE")"
     state_tmp=$(mktemp "$STATE.XXXXXX")
-    trap 'rm -f -- "$state_tmp"' EXIT
+    trap 'rm -f -- "$state_tmp" || true' EXIT
     printf '{"addedHidden":false}\n' >"$state_tmp"
+    safe_write_path "$STATE" || exit 1
     mv -f -- "$state_tmp" "$STATE"
     trap - EXIT
   fi
 fi
 
-"$(dirname "$0")/theme" enable --auto || true
+"$SCRIPT_DIR/theme" enable --auto || echo 'Candidate window theme step skipped; see the error above.' >&2

@@ -6,7 +6,7 @@ T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 export HOME="$T/home" ENABLE_TEST="$T"
 mkdir -p "$T/bin" "$T/scripts"
 cp "$HERE/scripts/enable" "$T/scripts/enable"
-printf '#!/bin/bash\nexit 0\n' >"$T/scripts/theme"
+printf '#!/bin/bash\necho real-theme >"$ENABLE_TEST/real-theme"\n[[ ${THEME_FAIL:-} != 1 ]] || { echo "theme failure reason" >&2; exit 1; }\nexit 0\n' >"$T/scripts/theme"
 cat >"$T/bin/busctl" <<'STUB'
 #!/bin/bash
 echo "$*" >>"$ENABLE_TEST/bus"
@@ -34,23 +34,47 @@ case "$*" in
   *' cat '*) printf '# /stock\nExecStart=%s\n' "${CAT_LINE:-/usr/bin/fcitx5 --disable notificationitem}" ;;
   *' restart '*) [[ ${FAIL_RESTART:-} != 1 ]] || exit 1 ;;
   *' show '*)
+    if [[ ${SWAP_DROPIN:-} == 1 && ! -e $ENABLE_TEST/dropin-swapped ]]; then
+      "$REAL_MV" "$HOME/.config/systemd/user" "$ENABLE_TEST/original-user"
+      ln -s "$ENABLE_TEST/foreign-user" "$HOME/.config/systemd/user"
+      touch "$ENABLE_TEST/dropin-swapped"
+    fi
     [[ ${UNREADABLE:-} != 1 ]] || exit 1
     printf '{ path=/usr/bin/fcitx5 ; argv[]=%s ; ignore_errors=%s ; }\n' "${FCITX_ARGV:-/usr/bin/fcitx5 --disable notificationitem}" "${IGNORE_ERRORS:-no}"
     ;;
 esac
+STUB
+REAL_RM=$(command -v rm); export REAL_RM
+cat >"$T/bin/rm" <<'STUB'
+#!/bin/bash
+if [[ ${FAIL_ROLLBACK_RM:-} == 1 && $1 == -f ]]; then
+  echo "$*" >>"$ENABLE_TEST/rollback-rm"
+  for dest; do :; done
+  [[ $dest != */zz-input-menu.conf && $dest != */input-menu-enable.json ]] || exit 1
+fi
+exec "$REAL_RM" "$@"
 STUB
 REAL_MV=$(command -v mv); export REAL_MV
 cat >"$T/bin/mv" <<'STUB'
 #!/bin/bash
 a=("$@"); n=${#a[@]}; src=${a[n-2]}; dest=${a[n-1]}
 if [[ $dest == */zz-input-menu.conf ]]; then
+  [[ ${FAIL_ROLLBACK_MV:-} != 1 || $src != */.previous.* ]] || exit 1
   [[ ${src%/*} == "${dest%/*}" ]] || echo bad >"$ENABLE_TEST/atomic"
   if [[ ${FAIL_PUBLISH:-} == 1 && ! -e $ENABLE_TEST/mv-failed ]]; then touch "$ENABLE_TEST/mv-failed"; exit 1; fi
 fi
 if [[ $dest == */input-menu-enable.json && ${FAIL_STATE:-} == 1 ]]; then exit 1; fi
 exec "$REAL_MV" "$@"
 STUB
-printf '#!/bin/bash\nexit 0\n' >"$T/bin/sleep"
+cat >"$T/bin/sleep" <<'STUB'
+#!/bin/bash
+if [[ ${SWAP_STATE:-} == 1 && ! -e $ENABLE_TEST/state-swapped ]]; then
+  mkdir -p "$HOME/.local"
+  [[ ! -d $HOME/.local/state ]] || "$REAL_MV" "$HOME/.local/state" "$ENABLE_TEST/original-state"
+  ln -s "$ENABLE_TEST/foreign-state" "$HOME/.local/state"
+  touch "$ENABLE_TEST/state-swapped"
+fi
+STUB
 cat >"$T/bin/omarchy-bar" <<'STUB'
 #!/bin/bash
 echo "$*" >>"$ENABLE_TEST/bar"
@@ -152,5 +176,61 @@ for where in systemd state; do
   [[ $rc -ne 0 && $out == *symlink* ]] || { echo "FAIL: enable through linked $where: rc=$rc out=$out"; fails=1; }
   check "enable linked $where left target untouched" "$(tree_sum "$HOME/elsewhere")" "$(cat "$T/elsewhere.before")"
 done
+# Theme failure warns once without failing successful tray enable.
+reset; rm "$DROPIN"
+THEME_FAIL=1 "$T/scripts/enable" >"$T/theme-out" 2>"$T/theme-err"
+check 'theme failure keeps enable successful' "$?" 0
+check 'theme failure has one skipped-step warning' "$(grep -c '^Candidate window theme step skipped;' "$T/theme-err")" 1
+grep -q 'theme failure reason' "$T/theme-err" || { echo 'FAIL: theme diagnostic lost'; fails=1; }
+[[ $(tail -1 "$T/theme-err") == *'see the error above'* ]] || { echo 'FAIL: skipped theme warning lacks guidance'; fails=1; }
+
+# A path swapped after the initial check cannot redirect a later write.
+reset; mkdir -p "$T/foreign-user/omarchy-fcitx5.service.d"
+echo keep >"$T/foreign-user/omarchy-fcitx5.service.d/zz-input-menu.conf"
+before=$(tree_sum "$T/foreign-user")
+out=$(SWAP_DROPIN=1 "$T/scripts/enable" 2>&1); check 'drop-in swapped before publish exit' "$?" 1
+[[ $out == *symlink* ]] || { echo 'FAIL: late drop-in link lacks reason'; fails=1; }
+check 'late drop-in link leaves target' "$(tree_sum "$T/foreign-user")" "$before"
+for hidden in no yes; do
+  reset; rm -f "$T/state-swapped"; rm -rf "$T/foreign-state"; mkdir -p "$T/foreign-state"; echo keep >"$T/foreign-state/sentinel"
+  if [[ $hidden == yes ]]; then echo '{"bar":{"layout":{"right":[{"id":"omarchy.tray","hidden":["Fcitx"]}]}}}' >"$HOME/.config/omarchy/shell.json"; fi
+  before=$(tree_sum "$T/foreign-state")
+  out=$(SWAP_STATE=1 "$T/scripts/enable" 2>&1); check "state swapped during wait hidden=$hidden exit" "$?" 1
+  [[ $out == *symlink* ]] || { echo "FAIL: late state link hidden=$hidden lacks reason"; fails=1; }
+  check "late state link hidden=$hidden leaves target" "$(tree_sum "$T/foreign-state")" "$before"
+  [[ ! -e $T/bar ]] || { echo 'FAIL: hide happened after late state symlink'; fails=1; }
+done
+
+# Relative, chained entry-point symlinks must use the real sibling theme.
+reset; rm "$DROPIN"; mkdir -p "$T/links"
+ln -s ../scripts/enable "$T/links/first"; ln -s first "$T/links/enable"
+printf '#!/bin/bash\necho decoy >"$ENABLE_TEST/decoy-theme"\n' >"$T/links/theme"; chmod +x "$T/links/theme"
+rm -f "$T/real-theme"
+"$T/links/enable" >"$T/output" 2>&1; check 'linked enable exit' "$?" 0
+[[ -e $T/real-theme && ! -e $T/decoy-theme ]] || { echo 'FAIL: linked enable used wrong sibling theme'; fails=1; }
+
+# Existing directories must not become rename containers.
+for target in "$DROPIN" "$STATE"; do
+  reset; mkdir -p "${target%/*}"; rm -f "$target"; mkdir "$target"; echo keep >"$target/sentinel"
+  before=$(tree_sum "$HOME")
+  out=$("$T/scripts/enable" 2>&1); check "directory ${target##*/} exit" "$?" 1
+  [[ $out == *directory* ]] || { echo "FAIL: directory target has no reason: $target"; fails=1; }
+  check "directory ${target##*/} unchanged" "$(tree_sum "$HOME")" "$before"
+  [[ ! -e $T/systemctl && ! -e $T/bar ]] || { echo 'FAIL: directory target had side effects'; fails=1; }
+done
+# A failed rollback operation cannot prevent the remaining cleanup/reload.
+reset
+UNREADABLE=1 FAIL_ROLLBACK_MV=1 "$T/scripts/enable" >"$T/output" 2>&1
+check 'rollback mv failure exit' "$?" 1
+check 'reload still follows failed restore mv' "$(tail -1 "$T/systemctl")" '--user daemon-reload'
+reset; rm "$DROPIN"; touch "$T/wait-sni"
+NO_SNI=1 FAIL_ROLLBACK_RM=1 "$T/scripts/enable" >"$T/output" 2>&1
+check 'rollback rm failure exit' "$?" 1
+check 'restart still follows failed rollback rm' "$(grep -c ' restart ' "$T/systemctl")" 2
+rm -f "$T/wait-sni" "$T/rollback-rm"
+reset; rm "$DROPIN"
+FAIL_BAR=1 FAIL_ROLLBACK_RM=1 "$T/scripts/enable" >"$T/output" 2>&1
+check 'state rollback rm failure exit' "$?" 1
+check 'state temp cleanup still runs after failed rm' "$(wc -l <"$T/rollback-rm" | tr -d ' ')" 2
 if (( fails )); then echo FAILED; exit 1; fi
 echo ok

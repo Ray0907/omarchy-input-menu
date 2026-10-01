@@ -50,7 +50,7 @@ scripts/theme enable         # explicit takeover; --auto respects claimed choice
 scripts/theme disable        # restore previous values and remove our files
 ```
 
-The tray enable/disable commands also apply/release the theme, without failing the tray step if theme cleanup must be deferred. `scripts/enable` (when it applies the theme) and `scripts/theme enable` run `omarchy-theme-refresh`. Theme commands never start fcitx5 themselves.
+The tray enable/disable commands also apply/release the theme, without failing the tray step if theme cleanup must be deferred. `scripts/enable` (when it applies the theme) and `scripts/theme enable` run `omarchy-theme-refresh`. Theme commands never start fcitx5 themselves. If the candidate-theme step fails, enable warns and keeps the successful tray setup.
 
 ## What it changes
 

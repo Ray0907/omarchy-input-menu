@@ -114,5 +114,14 @@ for where in systemd state; do
   check "disable linked $where left target untouched" "$(tree_sum "$HOME/elsewhere")" "$(cat "$T/elsewhere.before")"
   [[ $where != systemd ]] || ! grep -q 'systemctl --user restart' "$T/calls" || { echo 'FAIL: disable restarted fcitx5 for a linked drop-in'; fails=1; }
 done
+# Relative, chained entry-point symlinks cannot execute a decoy sibling.
+unset FAIL_START
+reset; touch "$T/running"; mkdir -p "$T/links"
+ln -s ../scripts/disable "$T/links/first"; ln -s first "$T/links/disable"
+printf '#!/bin/bash\necho decoy >"$DISABLE_TEST/decoy-theme"\n' >"$T/links/theme"; chmod +x "$T/links/theme"
+"$T/links/disable" >"$T/output" 2>&1; check 'linked disable exit' "$?" 0
+check 'linked disable calls real theme' "$(grep -c '^theme disable$' "$T/calls")" 1
+[[ ! -e $T/decoy-theme ]] || { echo 'FAIL: linked disable used decoy theme'; fails=1; }
+cleaned 'linked disable'
 if (( fails )); then echo FAILED; exit 1; fi
 echo ok
