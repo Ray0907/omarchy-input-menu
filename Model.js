@@ -131,7 +131,19 @@ function guardedLaunch(pattern, argv) {
   return ["sh", "-c", "pgrep -u \"$(id -u)\" -f -- \"$0\" | grep -qvx \"$$\" || exec \"$@\"", "[" + p.charAt(0) + "]" + p.slice(1)].concat(argv)
 }
 
+// WCAG relative luminance and contrast ratio for {r,g,b} in 0..1.
+function luminance(c) {
+  function ch(v) { return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4) }
+  return 0.2126 * ch(c.r) + 0.7152 * ch(c.g) + 0.0722 * ch(c.b)
+}
+function contrast(a, b) {
+  var la = luminance(a), lb = luminance(b)
+  return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05)
+}
+// Text color for a highlight filled with `fill`: the candidate with the higher contrast.
+function pickInk(fill, a, b) { return contrast(fill, a) >= contrast(fill, b) ? a : b }
+
 if (typeof module !== "undefined") {
   module.exports = { parseIconUrl: parseIconUrl, localeKey: localeKey, glyphFor: glyphFor, titleFor: titleFor,
-                     isKeyboard: isKeyboard, rows: rows, strings: strings, localFilePath: localFilePath, shellQuote: shellQuote, guardedLaunch: guardedLaunch, DEFAULT_HIDDEN_MODES: DEFAULT_HIDDEN_MODES }
+                     isKeyboard: isKeyboard, rows: rows, strings: strings, localFilePath: localFilePath, shellQuote: shellQuote, guardedLaunch: guardedLaunch, pickInk: pickInk, DEFAULT_HIDDEN_MODES: DEFAULT_HIDDEN_MODES }
 }

@@ -114,6 +114,11 @@ for (const id of ["emoji", "settings", "enable", "installIm", "matchTheme"]) {
 }
 assert.ok(!/a\.id === "[a-zA-Z]+"\) launch\(\[/.test(qml.replace(/a\.id === "start"\) launch\(/, "")), 'no action launches without the guard (except starting fcitx5)')
 assert.ok(!source.includes('cacheFile.setText') && source.includes('function saveCache(text)') && source.includes('scripts/save-modes'), 'the mode cache is written by scripts/save-modes (real paths, exclusive temporary file), never by FileView, which follows a symlink at its path')
+assert.ok(qml.includes('Model.pickInk(Color.accent, Color.popups.background, root.barForeground)'), 'highlight text color is chosen by contrast against the accent')
+assert.ok(/color: hasCursor \? \(mouse\.pressed \? Qt\.darker\(Color\.accent, 1\.2\) : Color\.accent\) : "transparent"/.test(qml), 'hover fills with the accent and darkens while pressed')
+assert.ok(/property real reveal: root\.opened \? 1 : 0/.test(qml) && /Behavior on reveal \{ SpringAnimation \{ spring: 5; damping: 0\.5; epsilon: 0\.001 \} \}/.test(qml), 'menu reveal is a spring (measured on the device: no overshoot, about 320 ms) that starts from the current value, so it can be interrupted')
+assert.ok(/scale: mouse\.pressed \? 0\.97 : 1/.test(qml) && /Behavior on scale \{ SpringAnimation \{ spring: 5; damping: 0\.5; epsilon: 0\.001 \} \}/.test(qml), 'a pressed row shrinks to 97% on a spring, instantly on pointer-down')
+assert.ok(/xScale: 0\.96 \+ 0\.04 \* root\.reveal/.test(qml) && /yScale: 0\.96 \+ 0\.04 \* root\.reveal/.test(qml) && qml.includes('keyCatcher.mapFromItem(button, button.width / 2, 0).x'), 'menu grows from the badge')
 const enable = require('node:fs').readFileSync('scripts/enable', 'utf8')
 const disable = require('node:fs').readFileSync('scripts/disable', 'utf8')
 assert.ok(enable.includes('"$SCRIPT_DIR/theme" enable --auto ||'), 'resolved sibling theme is best-effort after successful tray enable')

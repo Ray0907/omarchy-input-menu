@@ -146,4 +146,11 @@ assert.strictEqual(require("child_process").execFileSync("bash", ["-c", "printf 
   fs.rmSync(dir, { recursive: true })
 }
 
+// Highlight text color: whichever candidate has the higher contrast against the accent fill.
+const dark = { r: 0.1, g: 0.1, b: 0.1 }, light = { r: 0.95, g: 0.95, b: 0.95 }
+assert.strictEqual(M.pickInk({ r: 0.9, g: 0.8, b: 0.3 }, dark, light), dark, "light accent takes dark text")
+assert.strictEqual(M.pickInk({ r: 0.1, g: 0.2, b: 0.5 }, dark, light), light, "dark accent takes light text")
+assert.strictEqual(M.pickInk({ r: 0.48, g: 0.64, b: 0.97 }, light, dark), dark, "order of candidates does not matter")
+assert.strictEqual(M.pickInk({ r: 0.5, g: 0.5, b: 0.5 }, dark, dark), dark, "identical candidates")
+
 console.log("ok")
